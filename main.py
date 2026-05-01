@@ -3,6 +3,7 @@ from pyrogram import Client, filters
 
 import modules.config as cfg
 import modules.database as db
+import modules.manuscript as manuscript
 import modules.utils as utils
 import modules.actions.sync as sync
 import modules.actions.ai_logic as ai_summary
@@ -60,7 +61,12 @@ async def sber_edit_handler(client, message):
 @app.on_message(filters.chat(cfg.TARGET_CHAT_ID) & filters.text)
 async def main_handler(client, message):
     text, user = message.text.strip(), message.from_user
-    username, is_me = (user.username if user else None), (user and (user.username == cfg.MY_USERNAME or user.is_self))
+    username = user.username if user else None
+    user_id = user.id if user else 0
+    first_name = user.first_name if user and user.first_name else "там"
+    is_me = bool(user and (user.username == cfg.MY_USERNAME or user.is_self))
+    reply_user = message.reply_to_message.from_user if message.reply_to_message else None
+    is_reply_to_me = bool(reply_user and reply_user.is_self)
     m_data = await utils.format_msg(message)
     if not m_data: return
 
@@ -79,29 +85,32 @@ async def main_handler(client, message):
         sync.temp_buffer.append(m_data); return
 
     db.save_message(*m_data)
+    manuscript.save_message(message)
 
     # 2. КОМАНДЫ И ИИ
     if is_me and (dm := re.search(cfg.DUMP_PATTERN, text)):
         await admin.do_dump(message, dm.group(1))
     elif re.search(cfg.HELP_PATTERN, text.lower()):
-        await utils.send_as_phantom(message, f"Йо, {user.first_name}! \n {cfg.HELP_MESSAGE}")
+        await utils.send_as_phantom(message, f"Йо, {first_name}! \n {cfg.HELP_MESSAGE}")
     elif re.search(cfg.SUMMARY_PATTERN, text.lower()):
         status = await message.reply_text("Разбираюсь...")
-        res = await ai_summary.get_chat_summary(db.get_history_from_db(100), cfg.USER_API_KEYS.get(username), user.id, username)
+        chat_id = message.chat.id if message.chat else cfg.TARGET_CHAT_ID
+        history = manuscript.prepend_segments(db.get_history_from_db(100), chat_id)
+        res = await ai_summary.get_chat_summary(history, cfg.USER_API_KEYS.get(username), user_id, username)
         await utils.send_as_phantom(message, f"**Нарыл:**\n\n{res}", edit_message=status)
-    elif "@tech_phantom" in text.lower() or (message.reply_to_message and message.reply_to_message.from_user.is_self and re.search(cfg.PHANTOM_NAMES_PATTERN, text.lower())):
-        await ai_dialog.handle_dialog(message, text, username, user.id)
+    elif "@tech_phantom" in text.lower() or (is_reply_to_me and re.search(cfg.PHANTOM_NAMES_PATTERN, text.lower())):
+        await ai_dialog.handle_dialog(message, text, username, user_id)
 
     # 3. ИГРЫ И РЕАКЦИИ
     elif lose_game.check_lose_condition(text):
         await utils.send_as_phantom(message, "Я проиграл")
     elif "лоб" in text.lower():
         if re.search(cfg.PHANTOM_NAMES_PATTERN, text):
-            await utils.send_as_phantom(message, f"Лоб, {user.first_name} )")
+            await utils.send_as_phantom(message, f"Лоб, {first_name} )")
         else:
             await client.send_reaction(message.chat.id, message.id, "💋")
     elif re.search(cfg.YO_PATTERN, text):
-        await utils.send_as_phantom(message, "Рад видеть, Nikitos" if is_me else f"Йоо, {user.first_name}!")
+        await utils.send_as_phantom(message, "Рад видеть, Nikitos" if is_me else f"Йоо, {first_name}!")
 
 async def main_loop():
     while not shutdown_event.is_set():
