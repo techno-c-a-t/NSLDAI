@@ -10,7 +10,8 @@ async def handle_dialog(message, text, username, user_id):
     # 1. Логика сбора контекста
     if "@tech_phantom" in text.lower():
         if not message.reply_to_message:
-            return await utils.send_as_phantom(message, f"Йо, {message.from_user.first_name}! Ты тегнул меня без реплая. Напиши 'Фантом, гайд'.")
+            first_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "там"
+            return await utils.send_as_phantom(message, f"Йо, {first_name}! Ты тегнул меня без реплая. Напиши 'Фантом, гайд'.")
         
         replied_id = message.reply_to_message.id
         ctx = db.get_messages_before(replied_id, 30) + db.get_messages_between(replied_id, message.id)
