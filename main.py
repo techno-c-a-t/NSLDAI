@@ -3,6 +3,7 @@ from pyrogram import Client, filters
 
 import modules.config as cfg
 import modules.database as db
+import modules.manuscript as manuscript
 import modules.utils as utils
 import modules.actions.sync as sync
 import modules.actions.ai_logic as ai_summary
@@ -84,6 +85,7 @@ async def main_handler(client, message):
         sync.temp_buffer.append(m_data); return
 
     db.save_message(*m_data)
+    manuscript.save_message(message)
 
     # 2. КОМАНДЫ И ИИ
     if is_me and (dm := re.search(cfg.DUMP_PATTERN, text)):
@@ -92,7 +94,9 @@ async def main_handler(client, message):
         await utils.send_as_phantom(message, f"Йо, {first_name}! \n {cfg.HELP_MESSAGE}")
     elif re.search(cfg.SUMMARY_PATTERN, text.lower()):
         status = await message.reply_text("Разбираюсь...")
-        res = await ai_summary.get_chat_summary(db.get_history_from_db(100), cfg.USER_API_KEYS.get(username), user_id, username)
+        chat_id = message.chat.id if message.chat else cfg.TARGET_CHAT_ID
+        history = manuscript.prepend_segments(db.get_history_from_db(100), chat_id)
+        res = await ai_summary.get_chat_summary(history, cfg.USER_API_KEYS.get(username), user_id, username)
         await utils.send_as_phantom(message, f"**Нарыл:**\n\n{res}", edit_message=status)
     elif "@tech_phantom" in text.lower() or (is_reply_to_me and re.search(cfg.PHANTOM_NAMES_PATTERN, text.lower())):
         await ai_dialog.handle_dialog(message, text, username, user_id)

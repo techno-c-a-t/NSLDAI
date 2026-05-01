@@ -29,6 +29,15 @@ def _load_user_keys():
         raise SystemExit("USER_API_KEYS_JSON must be a JSON object")
     return data
 
+def _optional_int(name, default):
+    value = os.getenv(name)
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        raise SystemExit(f"Environment variable {name} must be an integer")
+
 # Чувствительные данные берем из окружения
 API_ID = _required_int("API_ID")
 API_HASH = _required("API_HASH")
@@ -40,6 +49,9 @@ MY_USERNAME = "techno_c_a_t"
 DB_NAME = "phantom_history.db"
 DUMP_FILE = "dump.txt"
 SBER_BOT = "smartspeech_sber_bot"
+MANUSCRIPT_DB_PATH = os.getenv("MANUSCRIPT_DB_PATH")
+MANUSCRIPT_DATABASE_URL = os.getenv("MANUSCRIPT_DATABASE_URL")
+MANUSCRIPT_SEGMENTS_LIMIT = _optional_int("MANUSCRIPT_SEGMENTS_LIMIT", 3)
 
 # Состояние для отслеживания текущего ГС
 current_voice_target = None

@@ -49,6 +49,9 @@
 *   `TARGET_CHAT_ID` — ID группы для работы.
 *   `DEFAULT_API_KEY` — Мастер-ключ для LLM.
 *   `USER_API_KEYS_JSON` — Словарь личных ключей пользователей.
+*   `MANUSCRIPT_DATABASE_URL` — Опциональная Postgres-БД NSLDNK для записи сообщений и чтения сегментов манускрипта.
+*   `MANUSCRIPT_DB_PATH` — Локальный SQLite fallback для разработки.
+*   `MANUSCRIPT_SEGMENTS_LIMIT` — Сколько последних сегментов манускрипта добавлять в контекст (по умолчанию 3).
 
 ### Установка и запуск
 1. `python3 -m venv venv && source venv/bin/activate`

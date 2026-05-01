@@ -1,5 +1,6 @@
 import modules.config as cfg
 import modules.database as db
+import modules.manuscript as manuscript
 import modules.utils as utils
 from modules.ai_service import call_ai
 
@@ -21,6 +22,8 @@ async def handle_dialog(message, text, username, user_id):
         replied_id = message.reply_to_message.id
         ctx = db.get_messages_before(replied_id, 30) + [f"[Я (Фантом)]: {message.reply_to_message.text}"] + db.get_messages_after(replied_id, 10)
         user_prompt = text
+    chat_id = message.chat.id if message.chat else cfg.TARGET_CHAT_ID
+    ctx = manuscript.prepend_segments(ctx, chat_id)
 
     # 2. Запрос к AI
     status = await message.reply_text("Вникаю...")
