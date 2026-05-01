@@ -6,11 +6,34 @@ import json
 # Загружаем данные из .env
 load_dotenv()
 
+def _required(name):
+    value = os.getenv(name)
+    if not value:
+        raise SystemExit(f"Missing required environment variable: {name}")
+    return value
+
+def _required_int(name):
+    value = _required(name)
+    try:
+        return int(value)
+    except ValueError:
+        raise SystemExit(f"Environment variable {name} must be an integer")
+
+def _load_user_keys():
+    raw = os.getenv("USER_API_KEYS_JSON", "{}")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"USER_API_KEYS_JSON must be valid JSON: {exc}")
+    if not isinstance(data, dict):
+        raise SystemExit("USER_API_KEYS_JSON must be a JSON object")
+    return data
+
 # Чувствительные данные берем из окружения
-API_ID = int(os.getenv("API_ID", 0))  # превращаем в число
-API_HASH = os.getenv("API_HASH")
-TARGET_CHAT_ID = int(os.getenv("TARGET_CHAT_ID", 0))
-DEFAULT_API_KEY = os.getenv("DEFAULT_API_KEY")
+API_ID = _required_int("API_ID")
+API_HASH = _required("API_HASH")
+TARGET_CHAT_ID = _required_int("TARGET_CHAT_ID")
+DEFAULT_API_KEY = _required("DEFAULT_API_KEY")
 
 # Нечувствительные данные можно оставить как есть
 MY_USERNAME = "techno_c_a_t"
@@ -23,8 +46,7 @@ current_voice_target = None
 # 
 # Если нужно хранить словарь с ключами пользователей
 # Лучше всего тоже брать ключ из .env
-user_keys_raw = os.getenv("USER_API_KEYS_JSON", "{}")
-USER_API_KEYS = json.loads(user_keys_raw)
+USER_API_KEYS = _load_user_keys()
 
 # Модели
 MODEL_PREMIUM = "gemini-3.1-flash-lite-preview"
