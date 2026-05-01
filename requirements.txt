@@ -1,0 +1,4 @@
+Pyrogram==2.0.106
+TgCrypto==1.2.5
+openai==1.55.3
+python-dotenv==1.0.1
