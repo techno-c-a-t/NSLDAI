@@ -2,11 +2,6 @@ import sqlite3
 from modules.config import DB_NAME
 import datetime
 
-def init_db():
-    with sqlite3.connect(DB_NAME) as conn:
-        conn.execute('''CREATE TABLE IF NOT EXISTS messages 
-                        (id INTEGER PRIMARY KEY, author TEXT, text TEXT, ts INTEGER)''')
-
 def clear_db():
     with sqlite3.connect(DB_NAME) as conn:
         conn.execute("DELETE FROM messages")
