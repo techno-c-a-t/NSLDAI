@@ -4,7 +4,7 @@ import modules.utils as utils
 
 async def do_dump(message, count_str):
     count = int(count_str)
-    if count > 100: resp = "Много хочешь"
+    if count > cfg.HISTORY_SIZE: resp = "Много хочешь"
     else:
         hist = db.get_history_from_db(count)
         if len(hist) < count: resp = f"Помню только {len(hist)}"

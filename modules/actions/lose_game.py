@@ -3,7 +3,7 @@ import time
 
 # Переменная для хранения времени последнего срабатывания (в памяти)
 last_lose_time = 0
-COOLDOWN_SECONDS = 600  # 10 минут
+COOLDOWN_SECONDS = 3600  # 10 минут
 
 def check_lose_condition(text):
     """

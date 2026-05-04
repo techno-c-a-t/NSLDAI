@@ -10,7 +10,7 @@ async def handle_dialog(message, text, username, user_id):
     # 1. Логика сбора контекста
     if "@tech_phantom" in text.lower():
         if not message.reply_to_message:
-            return await utils.send_as_phantom(message, f"Йо, {message.from_user.first_name}! Ты тегнул меня без реплая. Напиши 'Фантом, гайд'.")
+            return await utils.send_as_phantom(message, f"Йо, {message.from_user.first_name}! Ты тегнул меня без ответа на сообщение((( я не смогу понять контекст. Напиши 'Фантом, гайд'.")
         
         replied_id = message.reply_to_message.id
         ctx = db.get_messages_before(replied_id, 30) + db.get_messages_between(replied_id, message.id)
@@ -28,7 +28,7 @@ async def handle_dialog(message, text, username, user_id):
     target = f"Ответь на это: {user_prompt}" if user_prompt else "Ответь на последнее сообщение в контексте."
     full_prompt = cfg.AI_PROMPTS["dialog_user"].format(context=context_text, target=target)
     
-    answer = await call_ai(user_id, username, user_key, cfg.AI_PROMPTS["dialog_system"], full_prompt, max_tokens=5000)
+    answer = await call_ai(user_id, username, user_key, cfg.AI_PROMPTS["dialog_system"], full_prompt, max_tokens=5000, status_msg=status)
     
     # 3. Отправка и сохранение
     await utils.send_as_phantom(message, answer, edit_message=status)

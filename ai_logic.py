@@ -63,3 +63,38 @@ async def get_chat_summary(messages_list, user_api_key):
         if "429" in str(e):
             return "Лимиты ключа исчерпаны. Попробуй позже."
         return f"Ошибка AI: {str(e)}"
+    
+async def validate_transcription(text, user_api_key):
+    """Проверяет, является ли текст осмысленной расшифровкой или мусором"""
+    if not text or len(text.strip()) < 2:
+        return False
+
+    client = OpenAI(
+        api_key=user_api_key,
+        base_url=BASE_URL
+    )
+
+    prompt = f"""
+    Проанализируй текст расшифровки аудиосообщения. 
+    Определи, является ли это связной речью (пусть даже с ошибками) или это бессмысленный набор звуков, шум, галлюцинация ИИ или просто обрывки слов (например: "подпишитесь", "сообщения", "просто шум").
+
+    Текст: "{text}"
+
+    Ответь строго одним словом: YES если это похоже на реальное сообщение, и NO если это мусор/ошибка распознавания.
+    """
+
+    try:
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            model="gemini-1.5-flash", # Используем 1.5, так как 2.5 еще не вышла
+            messages=[
+                {"role": "system", "content": "Ты — фильтр качества транскрипции. Отвечаешь только YES или NO."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0, # Нужна максимальная точность
+        )
+        
+        answer = response.choices[0].message.content.strip().upper()
+        return "YES" in answer
+    except Exception:
+        return True # В случае ошибки AI лучше пропустить сообщение, чем удалить полезное

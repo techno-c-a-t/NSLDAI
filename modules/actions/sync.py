@@ -10,7 +10,7 @@ temp_buffer = []
 async def run_sync(client, trigger_msg):
     global current_state, temp_buffer
     max_id = db.get_max_id_in_db()
-    fetched, total_needed = [], 2000
+    fetched, total_needed = [], cfg.HISTORY_SIZE
     last_id = temp_buffer[0][0] if temp_buffer else trigger_msg.id
     found_gap = False
 
