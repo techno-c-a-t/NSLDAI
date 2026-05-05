@@ -39,7 +39,6 @@ def is_evil_user(user):
         
     return name_check or username_check
 
-
 voice_lock = asyncio.Lock()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
