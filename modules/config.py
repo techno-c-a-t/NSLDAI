@@ -21,6 +21,7 @@ DUMP_FILE = "dump.txt"
 SBER_BOT = "smartspeech_sber_bot"
 GIGACHAT_BOT = "gigachat_bot"
 GIGA_LOCK = asyncio.Lock()
+HISTORY_SIZE = 2000
 
 # Состояние для отслеживания текущего ГС
 current_voice_target = None
@@ -76,5 +77,4 @@ The Game: Я слежу, кто проигрывает. Если напишеш�
 
 6. ⚙️ Синхронизация
 При моем запуске я спрашиваю, нужно ли подгрузить историю. Если Nikitos говорит «Да», я изучу последние 500 сообщений, чтобы быть в курсе последних сплетен.
-
  """
