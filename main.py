@@ -123,7 +123,7 @@ async def main_handler(client, message):
         await utils.send_as_phantom(message, f"Йо, {user.first_name}! \n {cfg.HELP_MESSAGE}")
     elif re.search(cfg.SUMMARY_PATTERN, text.lower()):
         status = await message.reply_text("Разбираюсь...")
-        res = await ai_summary.get_chat_summary(db.get_history_from_db(100), cfg.USER_API_KEYS.get(username), user.id, username, status_msg=status)
+        res = await ai_summary.get_chat_summary(db.get_history_from_db(cfg.SUMMARY_CONTEXT_LENGTH), cfg.USER_API_KEYS.get(username), user.id, username, status_msg=status)
         await utils.send_as_phantom(message, f"**Нарыл:**\n\n{res}", edit_message=status)
     elif "@tech_phantom" in text.lower() or (message.reply_to_message and message.reply_to_message.from_user.is_self and re.search(cfg.PHANTOM_NAMES_PATTERN, text.lower())):
         await ai_dialog.handle_dialog(message, text, username, user.id)
@@ -135,7 +135,7 @@ async def main_handler(client, message):
         logger.info(f"Random faactor:{rand_val}")
         # 1/20 это 0.05
         if rand_val < 0.05:
-            await client.send_reaction(message.chat.id, message.id, "💋")
+            await client.send_reaction(message.chat.id, message.id, "👍")
         # 1/5 это 0.2
         elif rand_val < 0.2:
             await client.send_reaction(message.chat.id, message.id, "🏆")
