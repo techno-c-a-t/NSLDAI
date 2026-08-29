@@ -1,16 +1,58 @@
+"""
+@file voice.py
+@brief Модуль обработки голосовых сообщений (ГС) и аудиотреков.
+@details Использует последовательную очередь (asyncio.Queue) для взаимодействия со Сбер Спич Ботом,
+         поддерживает чистый режим реакций (👀 при обработке, 😭 при ошибках, тишина при аудио без речи)
+         и отмену лишних ИИ-фильтров.
+"""
+
 import asyncio
+import logging
+from typing import Optional, Any
 import modules.utils as utils
 import modules.config as cfg
-from modules.ai_service import call_ai
+import modules.database as db
+from modules.actions import tracer
+from modules.router import router, EventType, EventContext
 
-# Глобальные переменные для отслеживания состояния (в рамках одной сессии)
-pending_original_msg = None
-sber_ack_id = None
-processing_done = asyncio.Event()
-intro_sent = False 
+logger = logging.getLogger(__name__)
 
-def is_sber_error(text):
-    """Детект специфичных ошибок Сбера"""
+## @brief Асинхронная очередь ГС для последовательной отправки в Сбер Спич Бот
+sber_voice_queue: asyncio.Queue = asyncio.Queue()
+
+class VoiceContext:
+    """
+    @brief Контекст состояния обработки конкретного голосового сообщения.
+    """
+    def __init__(self, original_message: Any, status_msg: Optional[Any] = None, target_message: Optional[Any] = None):
+        """
+        @param original_message Исходное сообщение пользователя с ГС.
+        @param status_msg Опциональное служебное сообщение статуса ("Закинул на расшифровку").
+        @param target_message Целевое сообщение для установки реакций Telegram (ГС или запрос).
+        """
+        self.original_message = original_message
+        self.status_msg: Optional[Any] = status_msg
+        self.target_message: Any = target_message or status_msg or original_message
+        self.sber_ack_id: Optional[int] = None
+        self.done_event: asyncio.Event = asyncio.Event()
+
+## @brief Ссылка на текущий обрабатываемый контекст ГС
+active_context: Optional[VoiceContext] = None
+
+def is_music_track(message: Any) -> bool:
+    """
+    @brief Определяет, является ли медиафайл песней/музыкальным треком.
+    """
+    if message.audio:
+        return True
+    if message.voice and message.voice.duration and message.voice.duration > 180:
+        return True
+    return False
+
+def is_sber_error(text: str) -> Optional[str]:
+    """
+    @brief Проверяет текст ответа Сбер Спич Бота на наличие типичных системных ошибок.
+    """
     t = text.lower()
     if "слишком большое аудио" in t or ("большое" in t and "8mb" in t):
         return "limit"
@@ -18,91 +60,179 @@ def is_sber_error(text):
         return "format"
     return None
 
-async def validate_transcription(text, user_id, username, user_api_key):
+def is_no_speech(text: str) -> bool:
     """
-    Отправляет текст в ИИ, чтобы понять, мусор это или реальная речь.
-    Возвращает True (хороший текст) или False (мусор).
+    @brief Проверяет, вернул ли Сбер системный ответ об отсутствии речи в аудио.
     """
-    if not text or len(text.strip()) < 3:
-        return False
+    t = text.lower()
+    return "не удалось ничего распознать" in t or "без речи" in t or "аудио без речи" in t
 
-    system_prompt = "Ты — фильтр качества распознавания речи. Твоя задача: определить, является ли текст осмысленной фразой или это 'галлюцинация' ИИ (шум, тишина, системные сообщения)."
-    user_prompt = (
-        f"Проанализируй текст расшифровки: '{text}'\n\n"
-        "Является ли это связной речью? "
-        "Ответь только одним словом: YES если это осмысленное сообщение, и NO если это мусор, тишина или ошибка распознавания."
-    )
+async def queue_voice_message(
+    client: Any, 
+    message: Any, 
+    force: bool = False, 
+    status_msg: Optional[Any] = None,
+    request_msg: Optional[Any] = None
+) -> None:
+    """
+    @brief Помещает сообщение с ГС/аудио в последовательную очередь sber_voice_queue с установкой реакций.
+    """
+    chat_id = message.chat.id
+    clean_mode = db.get_chat_clean_mode(chat_id)
 
-    try:
-        # Используем твою обертку call_ai
-        res = await call_ai(user_id, username, user_api_key, system_prompt, user_prompt, model = cfg.MODEL_FREE)
-        return "YES" in res.upper()
-    except Exception as e:
-        print(f"Ошибка при валидации текста: {e}")
-        return True # В случае ошибки ИИ пропускаем сообщение на всякий случай
-
-async def handle_sber_message(client, message):
-    global sber_ack_id, pending_original_msg, intro_sent
-    text = message.text or ""
-
-    # 1. Сбер принял файл
-    if "аудиосообщение принято" in text.lower():
-        sber_ack_id = message.id
-        return
-
-    # 2. Если Сбер прислал новое сообщение с ошибкой
-    error_type = is_sber_error(text)
-    if error_type and pending_original_msg:
-        processing_done.set()
-        return
-
-    # 3. Доп. сообщения (если расшифровка разбита на несколько мессаджей)
-    if pending_original_msg and not "принято" in text.lower():
-        # Ждем, пока основное (отредактированное) сообщение пройдет проверку ИИ и отправит заголовок
-        counter = 0
-        while not intro_sent and counter < 50: 
-            await asyncio.sleep(0.1)
-            counter += 1
-        
-        if intro_sent:
-            await message.copy(pending_original_msg.chat.id, reply_to_message_id=pending_original_msg.id)
-
-async def handle_sber_edit(client, message):
-    global sber_ack_id, pending_original_msg, intro_sent
-    if not sber_ack_id or message.id != sber_ack_id: return
-    
-    text = message.text or ""
-    
-    # 1. Сначала проверяем на технические ошибки в тексте (edit)
-    error_type = is_sber_error(text)
-    if error_type and pending_original_msg:
-        processing_done.set()
-        return
-
-    # 2. Если пришла транскрипция (текст изменился с "принято" на что-то другое)
-    if pending_original_msg and "принято" not in text.lower():
-        
-        # --- ПОЛУЧАЕМ ДАННЫЕ ДЛЯ AI ---
-        user_id = pending_original_msg.from_user.id
-        username = pending_original_msg.from_user.username
-        # Предполагаем, что ключ лежит в конфиге или получен ранее
-        user_api_key = getattr(cfg, "GEMINI_KEY", None) 
-
-        # --- ПРОВЕРКА ЧЕРЕЗ GEMINI ---
-        is_valid = await validate_transcription(text, user_id, username, user_api_key)
-        
-        if not is_valid:
-            # Если ИИ сказал NO, просто завершаем процесс, ничего не пересылая
-            processing_done.set()
+    if not force:
+        if is_music_track(message):
+            logger.info(f"Музыкальный файл {message.id} пропущен в авто-режиме.")
+            if status_msg:
+                try: await status_msg.delete()
+                except Exception: pass
             return
 
-        # --- ЕСЛИ ТЕКСТ ВАЛИДЕН ---
-        # Отправляем фразу-вступление        
-        # Копируем само сообщение
-        await message.copy(pending_original_msg.chat.id, reply_to_message_id=pending_original_msg.id)
-        
-        # Разрешаем досылать остальные куски (если есть)
-        intro_sent = True 
-        
-        await asyncio.sleep(2) 
-        processing_done.set()
+        chat_mode = db.get_chat_voice_mode(chat_id)
+        if chat_mode == 'ON_DEMAND':
+            logger.info(f"ГС {message.id} пропущено: в чате {chat_id} включен режим по запросу.")
+            if status_msg:
+                try: await status_msg.delete()
+                except Exception: pass
+            return
+
+    target_msg = request_msg or status_msg or message
+
+    if clean_mode:
+        await utils.set_reaction(target_msg, "👀")
+
+    await sber_voice_queue.put((message, status_msg, target_msg))
+
+@router.on(EventType.TEXT_MESSAGE, priority=10)
+async def handle_auto_voice_message(ctx: EventContext) -> bool:
+    """
+    @brief Перехватчик всех входящих голосовых и аудио сообщений в разрешенных чатах.
+    """
+    message = ctx.message
+    if message and (message.voice or message.audio):
+        asyncio.create_task(queue_voice_message(None, message, force=False))
+        return True
+    return False
+
+async def sber_worker_loop(client: Any) -> None:
+    """
+    @brief Бесконечный фоновый воркер: извлекает ГС из очереди и отправляет Сбер Спич Боту по одному.
+    """
+    global active_context
+    logger.info("Запущен последовательный воркер ГС (Sber Speech Bot)...")
+    while True:
+        try:
+            item = await sber_voice_queue.get()
+            if isinstance(item, tuple) and len(item) == 3:
+                original_msg, status_msg, target_msg = item
+            elif isinstance(item, tuple):
+                original_msg, status_msg = item
+                target_msg = status_msg or original_msg
+            else:
+                original_msg, status_msg, target_msg = item, None, item
+
+            active_context = VoiceContext(original_msg, status_msg, target_msg)
+            
+            await original_msg.forward(cfg.SBER_SPEECH_BOT)
+            
+            try:
+                await asyncio.wait_for(active_context.done_event.wait(), timeout=180)
+            except asyncio.TimeoutError:
+                logger.warning(f"Таймаут обработки ГС для сообщения {original_msg.id}")
+                if active_context:
+                    chat_id = original_msg.chat.id
+                    clean_mode = db.get_chat_clean_mode(chat_id)
+                    if clean_mode or not active_context.status_msg:
+                        await utils.set_reaction(active_context.target_message, "😭")
+                    if active_context.status_msg:
+                        try: await active_context.status_msg.delete()
+                        except Exception: pass
+            finally:
+                active_context = None
+                sber_voice_queue.task_done()
+                await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.exception(f"Ошибка воркера ГС: {e}")
+            await asyncio.sleep(1)
+
+async def handle_sber_message(client: Any, message: Any) -> None:
+    """
+    @brief Обработчик входящих сообщений от Сбер Спич Бота.
+    """
+    global active_context
+    if not active_context:
+        return
+
+    text = message.text or ""
+
+    if "аудиосообщение принято" in text.lower():
+        active_context.sber_ack_id = message.id
+        return
+
+    error_type = is_sber_error(text)
+    if error_type:
+        chat_id = active_context.original_message.chat.id
+        clean_mode = db.get_chat_clean_mode(chat_id)
+        if clean_mode or not active_context.status_msg:
+            await utils.set_reaction(active_context.target_message, "😭")
+        if active_context.status_msg:
+            try: await active_context.status_msg.delete()
+            except Exception: pass
+        active_context.done_event.set()
+        return
+
+async def handle_sber_edit(client: Any, message: Any) -> None:
+    """
+    @brief Обработчик событий редактирования сообщений Сбером (приход финального текста).
+    """
+    global active_context
+    if not active_context or not active_context.sber_ack_id or message.id != active_context.sber_ack_id:
+        return
+
+    text = message.text or ""
+    orig = active_context.original_message
+    chat_id = orig.chat.id
+    clean_mode = db.get_chat_clean_mode(chat_id)
+    target_msg = active_context.target_message
+    
+    # 1. ТИХОЕ ЗАВЕРШЕНИЕ: АУДИО БЕЗ РЕЧИ
+    if is_no_speech(text):
+        await utils.set_reaction(target_msg, None)
+        if active_context.status_msg:
+            try: await active_context.status_msg.delete()
+            except Exception: pass
+        active_context.done_event.set()
+        return
+
+    # 2. ОШИБКА СБЕРА
+    error_type = is_sber_error(text)
+    if error_type:
+        await utils.set_reaction(target_msg, "😭")
+        if active_context.status_msg:
+            try: await active_context.status_msg.delete()
+            except Exception: pass
+        active_context.done_event.set()
+        return
+
+    # 3. УСПЕШНАЯ РАСШИФРОВКА БЕЗ ИИ-ВАЛИДАТОРА
+    if "принято" not in text.lower():
+        await utils.set_reaction(target_msg, None)
+
+        asyncio.create_task(tracer.queue_trace(chat_id, {
+            "event": "sber_speech_transcription",
+            "message_id": orig.id,
+            "transcription": text
+        }))
+
+        formatted_transcription = f"{text}"
+        if active_context.status_msg and not clean_mode:
+            try:
+                await active_context.status_msg.edit_text(formatted_transcription)
+                db.save_message(chat_id, active_context.status_msg.id, "Я (Фантом)", formatted_transcription, active_context.status_msg.date, category="VOICE_TRANSCRIPTION")
+            except Exception:
+                await utils.send_as_phantom(target_msg, formatted_transcription, category="VOICE_TRANSCRIPTION")
+        else:
+            await utils.send_as_phantom(target_msg, formatted_transcription, category="VOICE_TRANSCRIPTION")
+
+        await asyncio.sleep(1.0)
+        active_context.done_event.set()

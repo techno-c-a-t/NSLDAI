@@ -1,187 +1,192 @@
-import re, asyncio, logging, signal
-from pyrogram import Client, filters
+"""
+@file main.py
+@brief Главная точка входа приложения NSLDAI (Nasledniki AI / Фантом Userbot).
+@details Инициализирует Pyrogram Client в едином asyncio event loop, авто-кэширует диалоги,
+         подключает модули команд и обработчиков, управляет фоновой синхронизацией истории и реконнектами.
+"""
+
+import asyncio
+import logging
+import re
+from typing import Any
+from pyrogram import Client, filters, idle
+from pyrogram.types import Message
 
 import modules.config as cfg
 import modules.database as db
 import modules.utils as utils
-import modules.actions.sync as sync
-import modules.actions.ai_logic as ai_summary
-import modules.actions.dialog as ai_dialog
-import modules.actions.admin as admin
-import modules.actions.lose_game as lose_game
-import modules.actions.voice as voice
-from modules.actions import gigachat
-import random
+from modules.router import router, EventType, EventContext
+from modules.actions import voice, tracer, sync
 
-# Флаг для включения режима особых реакций (меняешь руками на True/False)
-ENABLE_EVIL_REACTIONS = True
-
-def is_evil_user(user):
-    """Проверяет, является ли пользователь тем самым Ивилом"""
-    if not user:
-        return False
-    
-    target_name = "𝓔𝓥𝓲𝓛"
-    target_username = "XTRaEViLman"
-    
-    # Проверка имени (first_name или last_name)
-    name_check = False
-    if user.first_name and target_name in user.first_name:
-        name_check = True
-    if user.last_name and target_name in user.last_name:
-        name_check = True
-        
-    # Проверка тега (username) без учета регистра и @
-    username_check = False
-    if user.username and user.username.lower() == target_username.lower():
-        username_check = True
-    logger.info(f"Evil factor:{name_check or username_check}")
-        
-    return name_check or username_check
-
-voice_lock = asyncio.Lock()
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+# Настройка системного логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
+# Инициализация клиента Pyrogram
 app = Client(
-    "tech_phantom_session",
+    "phantom_userbot",
     api_id=cfg.API_ID,
     api_hash=cfg.API_HASH,
-    ipv6=False,
-    sleep_threshold=20,
-    workers=4,
+    bot_token=cfg.BOT_TOKEN if cfg.BOT_TOKEN else None
 )
 
-shutdown_event = asyncio.Event()
+# Инициализация базы данных SQLite3
+db.init_db()
 
+# Регистрация динамических плагинов команд
+router.load_plugins("modules.actions")
 
-# 1. Ловим ГС в группе
-@app.on_message(filters.chat(cfg.TARGET_CHAT_ID) & (filters.voice | filters.audio))
-async def voice_handler(client, message):
-    async with voice_lock:
-        voice.intro_sent = False # <--- СБРОС ФЛАГА ТУТ
-        voice.pending_original_msg = message
-        voice.sber_ack_id = None
-        voice.processing_done.clear()
-        
-        await message.forward(cfg.SBER_BOT)
-        
-        # Ждем завершения (Event установится в voice.py)
-        try:
-            await asyncio.wait_for(voice.processing_done.wait(), timeout=60)
-        except asyncio.TimeoutError:
-            pass
-        finally:
-            voice.pending_original_msg = None
-
-# 2. Новые сообщения от Сбера (Статус или продолжение текста)
-@app.on_message(filters.chat(cfg.SBER_BOT))
-async def sber_msg_handler(client, message):
+@app.on_message(filters.chat(cfg.SBER_BOT), group=0)
+async def sber_bot_handler(client: Client, message: Message) -> None:
+    """
+    @brief Обработчик ответов от бота Сбер Спич Бот (Group 0).
+    """
+    logger.info(f"📩 [СБЕР СПИЧ БОТ] Получен ответ (id={message.id})")
     await voice.handle_sber_message(client, message)
 
-# 3. Редактирование сообщения Сбером (Сама транскрипция)
-@app.on_edited_message(filters.chat(cfg.SBER_BOT))
-async def sber_edit_handler(client, message):
+@app.on_edited_message(filters.chat(cfg.SBER_BOT), group=0)
+async def sber_bot_edited_handler(client: Client, message: Message) -> None:
+    """
+    @brief Обработчик редактируемых сообщений Сбер Спич Бот (Group 0).
+    """
+    logger.info(f"✏️ [СБЕР СПИЧ БОТ] Получена отредактированная транскрипция (id={message.id})")
     await voice.handle_sber_edit(client, message)
 
-# Хендлер для Гигачата
-@app.on_message(filters.chat("gigachat_bot"))
-async def gigachat_handler(client, message):
-    await gigachat.handle_giga_response(message)
+@app.on_message(group=1)
+async def main_handler(client: Client, message: Message) -> None:
+    """
+    @brief Главный перехватчик всех входящих сообщений Telegram (Group 1).
+    @details Реагирует СТРОГО на чаты из белого списка ALLOWED_CHAT_IDS.
+    """
+    chat_id = message.chat.id
+    
+    # Пропускаем технические ответы бота Сбер (они обрабатываются в sber_bot_handler)
+    if chat_id == cfg.SBER_BOT:
+        return
 
-@app.on_edited_message(filters.chat("gigachat_bot"))
-async def gigachat_edit_handler(client, message):
-    await gigachat.handle_giga_response(message)
+    # 1. ПРОВЕРКА БЕЛОГО СПИСКА ЧАТОВ (Строгий фильтр)
+    if not cfg.is_chat_allowed(chat_id):
+        return
 
-@app.on_message(filters.chat(cfg.TARGET_CHAT_ID) & filters.text)
-async def main_handler(client, message):
-    text, user = message.text.strip(), message.from_user
-    username, is_me = (user.username if user else None), (user and (user.username == cfg.MY_USERNAME or user.is_self))
-    m_data = await utils.format_msg(message)
-    if not m_data: return
+    text = message.text or message.caption or ""
+    author = utils.format_author(message)
+    user_id = message.from_user.id if message.from_user else 0
+    username = message.from_user.username if message.from_user else None
+    is_self = bool(message.from_user and message.from_user.is_self)
 
-    # 1. СИНХРОНИЗАЦИЯ
-    if sync.current_state == sync.STATE_WAITING_SYNC:
-        if is_me and text.lower() in ["да", "нет"]:
-            if text.lower() == "нет":
-                db.clear_db()
-                for m in sync.temp_buffer: db.save_message(*m)
-                sync.temp_buffer, sync.current_state = [], sync.STATE_NORMAL
-                await utils.send_as_phantom(message, "База очищена. Пишу с нуля.")
-            else:
-                await message.reply_text("Синхронизирую...")
-                await sync.run_sync(client, message)
+    logger.info(f"📩 [ВХОДЯЩЕЕ В РАЗРЕШЕННОМ ЧАТЕ] Chat: {chat_id} | Author: {author} (id={user_id}, is_self={is_self}) | Text: '{text[:80]}'")
+
+    # Авто-регистрация чата в мастер-таблице БД
+    chat_title = (message.chat.title or message.chat.first_name or f"Chat_{chat_id}") if message.chat else f"Chat_{chat_id}"
+    db.register_chat(chat_id, chat_title)
+
+    m_data = (message.id, author, text, message.date)
+
+    # 2. ПРОВЕРКА И ОБРАБОТКА РЕЖИМА СИНХРОНИЗАЦИИ (WAITING_SYNC / SYNCING)
+    sync_ctx = sync.get_sync_context(chat_id)
+    logger.info(f"🔄 [SYNC CHECK] Режим синхронизации чата {chat_id}: state={sync_ctx.state}")
+
+    if sync_ctx.state in [sync.STATE_WAITING_SYNC, sync.STATE_SYNCING]:
+        if is_self:
             return
-        sync.temp_buffer.append(m_data); return
 
-    db.save_message(*m_data)
+        clean_text = text.strip().lower()
 
-    # 2. КОМАНДЫ И ИИ
-    if is_me and (dm := re.search(cfg.DUMP_PATTERN, text)):
-        await admin.do_dump(message, dm.group(1))
-    elif re.search(cfg.HELP_PATTERN, text.lower()):
-        await utils.send_as_phantom(message, f"Йо, {user.first_name}! \n {cfg.HELP_MESSAGE}")
-    elif re.search(cfg.SUMMARY_PATTERN, text.lower()):
-        status = await message.reply_text("Разбираюсь...")
-        res = await ai_summary.get_chat_summary(db.get_history_from_db(100), cfg.USER_API_KEYS.get(username), user.id, username, status_msg=status)
-        await utils.send_as_phantom(message, f"**Нарыл:**\n\n{res}", edit_message=status)
-    elif "@tech_phantom" in text.lower() or (message.reply_to_message and message.reply_to_message.from_user.is_self and re.search(cfg.PHANTOM_NAMES_PATTERN, text.lower())):
-        await ai_dialog.handle_dialog(message, text, username, user.id)
+        if sync_ctx.state == sync.STATE_WAITING_SYNC:
+            if clean_text in ["да", "yes", "давай"]:
+                logger.info(f"✅ [SYNC] Получен ответ 'ДА' от {author}. Запуск офлайн-синхронизации!")
+                sync_ctx.state = sync.STATE_SYNCING
+                await message.reply_text("Начинаю загрузку пропущенной истории...")
+                asyncio.create_task(sync.run_sync(client, message))
+                return
+            elif clean_text in ["нет", "no", "отмена"]:
+                logger.info(f"🛑 [SYNC] Получен ответ 'НЕТ' от {author}. Синхронизация отменена.")
+                for m in sync_ctx.temp_buffer:
+                    db.save_message(chat_id, *m)
+                db.save_message(chat_id, *m_data)
+                sync_ctx.temp_buffer, sync_ctx.state = [], sync.STATE_NORMAL
+                await message.reply_text("Синхронизация отменена. Пишу с текущего момента.")
+                return
 
-    # 3. ИГРЫ И РЕАКЦИИ
-    # Логика случайных реакций для Ивила
-    if ENABLE_EVIL_REACTIONS and is_evil_user(message.from_user):
-        rand_val = random.random() # Генерирует число от 0.0 до 1.0
-        logger.info(f"Random faactor:{rand_val}")
-        # 1/20 это 0.05
-        if rand_val < 0.05:
-            await client.send_reaction(message.chat.id, message.id, "💋")
-        # 1/5 это 0.2
-        elif rand_val < 0.2:
-            await client.send_reaction(message.chat.id, message.id, "🏆")
-            
-    elif lose_game.check_lose_condition(text):
-        await utils.send_as_phantom(message, "Я проиграл")
-    elif "лоб" in text.lower():
-        # Если это Ивил — просто выходим из этого блока (скипаем)
-        if is_evil_user(message.from_user):
-            return # или pass, если ниже есть другой код
-        # Обычная логика для остальных
-        if re.search(cfg.PHANTOM_NAMES_PATTERN, text):
-            await utils.send_as_phantom(message, f"Лоб, {user.first_name} )")
-        else:
-            await client.send_reaction(message.chat.id, message.id, "💋")
+        # Во время WAITING_SYNC и SYNCING кэшируем все текущие сообщения в temp_buffer и НЕ высылаем в ИИ
+        logger.info(f"📦 [SYNC BUFFER] Сообщение id={message.id} кэшировано в буфер синхронизации чата {chat_id}.")
+        sync_ctx.temp_buffer.append(m_data)
+        return
 
-    elif re.search(cfg.YO_PATTERN, text):
-        await utils.send_as_phantom(message, "Рад видеть, Nikitos" if is_me else f"Йоо, {user.first_name}!")
+    # 3. В ОБЫЧНОМ РЕЖИМЕ (STATE_NORMAL) — СОХРАНЯЕМ В БД И ИДЕМ В ИИ
+    db.save_message(chat_id, *m_data)
+    logger.info(f"💾 [БД] Сообщение id={message.id} сохранено в историю chat_{chat_id}")
 
-async def main_loop():
-    while not shutdown_event.is_set():
-        try:
-            logger.info("Запуск сессии...")
-            await app.start()
-            sync.current_state, sync.temp_buffer = sync.STATE_WAITING_SYNC, []
-            try: await app.send_message(cfg.TARGET_CHAT_ID, "Снова в сети. Nikitos, читать историю?")
-            except Exception as e: 
-                logger.error(f"НЕ УДАЛОСЬ отправить сообщение в чат: {e}")
+    if is_self:
+        logger.info(f"⏭️ [SKIP] Сообщение отправлено аккаунтом Фантома (is_self=True). ИИ-обработка не запускается.")
+        return
 
-            while not shutdown_event.is_set():
-                if not app.is_connected: raise ConnectionError("Протухший сокет detected")
-                await asyncio.sleep(5)
-        except (OSError, ConnectionError) as e:
-            logger.error(f"Сетевая ошибка: {e}. Реконнект через 10с..."); await app.stop(); await asyncio.sleep(10)
-        except Exception as e:
-            logger.exception(f"Непредвиденный краш: {e}"); await asyncio.sleep(5)
+    # Формируем контекст события для маршрутизатора
+    ctx = EventContext(message=message, chat_id=chat_id, user_id=user_id, username=username, text=text)
 
-    logger.info("Выход из цикла...")
-    try: 
-        await app.send_message(cfg.TARGET_CHAT_ID, "Завершаю работу.... Всем пока")
-        await app.stop()
-    except: pass
+    # ---------------------------------------------------------------------
+    # ПОСЛЕДОВАТЕЛЬНЫЙ КОНВЕЙЕР МАРШРУТИЗАЦИИ (5 СТРОГИХ ЭТАПОВ)
+    # ---------------------------------------------------------------------
+    # ЭТАП 1: Проверка регулярных выражений Команд и Сводки (EventType.COMMAND)
+    logger.info(f"🔀 [STAGE 1] Диспетчеризация типа COMMAND (Команды и Сводка)...")
+    if await router.dispatch(ctx, EventType.COMMAND):
+        return
+
+    # ЭТАПЫ 2, 3, 4: Проверка реплаев на ГС, прямых обращений и имя (EventType.DIALOG)
+    is_direct_tag = "@tech_phantom" in text.lower()
+    is_reply_to_phantom = bool(message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.is_self and re.search(cfg.PHANTOM_NAMES_PATTERN, text.lower()))
+    has_phantom_name = bool(re.search(cfg.PHANTOM_NAMES_PATTERN, text.lower()))
+
+    logger.info(f"🧐 [DIALOG TRIGGER CHECK] tag={is_direct_tag}, reply={is_reply_to_phantom}, name_regex={has_phantom_name}")
+
+    if is_direct_tag or is_reply_to_phantom or has_phantom_name:
+        logger.info(f"🔀 [STAGES 2, 3, 4] Диспетчеризация типа DIALOG...")
+        if await router.dispatch(ctx, EventType.DIALOG):
+            return
+
+    # ЭТАП 5: Фоновые текстовые сообщения (EventType.TEXT_MESSAGE)
+    logger.info(f"🔀 [STAGE 5] Диспетчеризация типа TEXT_MESSAGE...")
+    await router.dispatch(ctx, EventType.TEXT_MESSAGE)
+
+async def setup_background_tasks() -> None:
+    """
+    @brief Запуск фоновой подгрузки access_hash диалогов и воркеров бота на общем Event Loop.
+    """
+    try:
+        logger.info("🔍 [PEER RESOLUTION] Подгрузка списка диалогов пользователя...")
+        count = 0
+        async for _ in app.get_dialogs(limit=100):
+            count += 1
+        logger.info(f"✅ [PEER RESOLUTION] Подгружено и закэшировано {count} диалогов.")
+        
+        if cfg.TARGET_CHAT_ID:
+            sync_ctx = sync.get_sync_context(cfg.TARGET_CHAT_ID)
+            sync_ctx.state = sync.STATE_WAITING_SYNC
+            logger.info(f"💬 Отправка стартового запроса синхронизации в TARGET_CHAT_ID ({cfg.TARGET_CHAT_ID})...")
+            try:
+                await app.send_message(cfg.TARGET_CHAT_ID, "Снова в сети. Nikitos, читать историю?")
+                logger.info("✅ Стартовый запрос синхронизации успешно отправлен.")
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось отправить приветственное сообщение: {e}")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка при подгрузке диалогов: {e}")
+
+    # Запуск фоновых воркеров ГС и трассировки
+    asyncio.create_task(voice.sber_worker_loop(app))
+    asyncio.create_task(tracer.trace_worker_loop(app))
 
 if __name__ == "__main__":
-    db.init_db()
-    loop = asyncio.get_event_loop()
-    for s in (signal.SIGINT, signal.SIGTERM): loop.add_signal_handler(s, lambda: shutdown_event.set())
-    try: loop.run_until_complete(main_loop())
-    except KeyboardInterrupt: pass
+    logger.info("🚀 Запуск сессии Pyrogram Userbot...")
+    app.start()
+    app.loop.create_task(setup_background_tasks())
+    logger.info("🟢 Pyrogram Userbot полностью запущен и слушает разрешенные чаты!")
+    idle()
+    logger.info("🛑 Остановка сессии Pyrogram...")
+    if getattr(app, "is_connected", False):
+        try:
+            app.stop()
+        except Exception:
+            pass
