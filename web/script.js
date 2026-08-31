@@ -176,11 +176,21 @@ const i18n = {
     }
 };
 
-let currentLang = 'ru';
+function detectLanguage() {
+    const saved = localStorage.getItem('nsldai_lang');
+    if (saved && i18n[saved]) return saved;
+
+    const browserLangs = navigator.languages || [navigator.language || navigator.userLanguage];
+    const isBelarusian = browserLangs.some(l => (l || '').toLowerCase().includes('be') || (l || '').toLowerCase().includes('by')) 
+                      || (Intl.DateTimeFormat().resolvedOptions().timeZone || '').includes('Minsk');
+
+    return isBelarusian ? 'be' : 'ru';
+}
+
+let currentLang = detectLanguage();
 
 document.addEventListener('DOMContentLoaded', () => {
-    const savedLang = localStorage.getItem('nsldai_lang') || 'ru';
-    setLanguage(savedLang);
+    setLanguage(detectLanguage());
 
     // Dropdown close listener
     document.addEventListener('click', (e) => {
