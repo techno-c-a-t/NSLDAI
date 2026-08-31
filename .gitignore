@@ -1,7 +1,15 @@
 venv/
 __pycache__/
 .env
-tech_phantom_session.session
-tech_phantom_session.session-journal
-phantom_history.db
 dump.txt
+
+# Databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Telegram Sessions
+*.session
+*.session-journal

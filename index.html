@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title data-i18n="docTitle">NSLDAI — Phantom</title>
+    <meta name="description" content="Презентация NSLDAI (Phantom) — автономной сущности Княжества Наследников.">
+    <meta name="keywords" content="NSLDAI, Phantom, Фантом, Наследники, Pyrogram, Gemini, Gemma, SberSpeech">
+    <meta name="author" content="technocat">
+    <link rel="canonical" href="https://phantom.technocat.cc">
+
+    <!-- FontAwesome & CSS -->
+    <link rel="stylesheet" href="https://use.fontawesome.com/releases/v5.15.4/css/all.css">
+    <link rel="stylesheet" href="web/style.css">
+</head>
+
+<body data-lang="ru">
+
+    <!-- Ambient Background Glow & Grid Pattern -->
+    <div class="ambient-glow"></div>
+    <div class="grid-pattern"></div>
+
+    <!-- HEADER / NAV -->
+    <header>
+        <div class="container nav-wrapper">
+            <a href="#" class="logo-area">
+                <div class="app-icon-box">
+                    <img src="web/avatar.png" onerror="this.src='web/avatar.svg'" alt="NSLDAI" class="app-icon-img">
+                </div>
+                <span>NSLDAI <span class="accent-text">Phantom</span></span>
+            </a>
+
+            <div class="nav-right">
+                <ul class="nav-links">
+                    <li><a href="#lore" data-i18n="navLore">Лор и История</a></li>
+                    <li><a href="#features" data-i18n="navFeatures">Возможности</a></li>
+                    <li><a href="#architecture" data-i18n="navArchitecture">Архитектура</a></li>
+                    <li><a href="#author" data-i18n="navAuthor">Об авторе</a></li>
+                </ul>
+
+                <!-- Дропдаун языков (BE / EN / RU) -->
+                <div class="lang-dropdown">
+                    <button class="lang-btn" id="langBtn" onclick="toggleLangMenu(event)">
+                        <span id="currentLangLabel">🇷🇺 RU</span>
+                        <i class="fas fa-caret-down"></i>
+                    </button>
+                    <div class="lang-menu" id="langMenu">
+                        <div class="lang-option" onclick="setLanguage('be')">🇧🇾 Беларуская</div>
+                        <div class="lang-option" onclick="setLanguage('en')">🇬🇧 English</div>
+                        <div class="lang-option" onclick="setLanguage('ru')">🇷🇺 Русский</div>
+                    </div>
+                </div>
+
+                <a href="https://github.com/techno-c-a-t/NSLDAI" target="_blank" rel="noopener" class="btn btn-github">
+                    <i class="fab fa-github"></i>
+                    GitHub
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <!-- MAIN CONTENT -->
+    <main class="container">
+
+        <!-- HERO SECTION -->
+        <section class="hero">
+            <div class="hero-content">
+                <div class="badge">
+                    <span class="badge-dot"></span>
+                    <span data-i18n="heroBadge">Автономная сущность · Pyrogram · MTProto</span>
+                </div>
+                <h1 class="hero-title" data-i18n="heroTitle">
+                    NSLDAI — Phantom
+                </h1>
+                <p class="hero-subtitle" data-i18n="heroSubtitle">
+                    От базового суммаризатора чата до автономной сущности Княжества Наследников. Умный контекстный ассистент, хранящий лор, анализирующий дискуссии и расшифровывающий речь.
+                </p>
+                <div class="hero-actions">
+                    <a href="https://wiki.mrtimeman.ru" target="_blank" class="btn btn-primary">
+                        <i class="fas fa-book"></i>
+                        <span data-i18n="btnWiki">Лор Наследников</span>
+                    </a>
+                    <a href="https://github.com/techno-c-a-t/NSLDAI" target="_blank" class="btn btn-secondary">
+                        <i class="fab fa-github"></i>
+                        <span data-i18n="btnGitHub">Исходный код</span>
+                    </a>
+                </div>
+            </div>
+
+            <!-- ИНТЕРАКТИВНАЯ ДЕМО-КАРТОЧКА СВОДКИ -->
+            <div class="stage-wrapper">
+                <div class="stage-card">
+                    <div class="stage-header">
+                        <div class="stage-title">
+                            <img src="web/avatar.png" onerror="this.src='web/avatar.svg'" style="width:20px; height:20px; border-radius:50%; border:1px solid var(--accent-color);">
+                            <span data-i18n="demoChatHeader">Phantom</span>
+                        </div>
+                        <span class="badge" style="margin:0; padding:2px 8px; font-size:0.7rem;">Live AI</span>
+                    </div>
+                    <div class="stage-body">
+                        <p style="font-weight:600; color:var(--accent-color);" data-i18n="demoChatTitle">
+                            Фантом, ИИ ассистент
+                        </p>
+                        <p id="demoBodyText" data-i18n="demoChatBody">
+                            • Сущность Княжества Наследников, анализирующая жизнь чата канала <a href="https://t.me/clown_crown" target="_blank" style="color:var(--accent-color); font-weight:600;">@clown_crown</a>.<br>
+                            • Зародившись как простой суммаризатор для смены сонного NSLDNK, развился в автономную модульную систему NSLDAI.<br>
+                            • Запоминает горожан, асинхронно конспектирует речи ораторов и оберегает покой традиций «Игры».
+                        </p>
+                    </div>
+                    <div class="stage-footer">
+                        <span data-i18n="demoStatus">Статус: онлайн 🟢</span>
+                        <span data-i18n="demoModel">Модель: Gemini 3.5 Flash Lite</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- LORE & STORY SECTION -->
+        <section id="lore" class="section">
+            <div class="section-header">
+                <span class="section-tag" data-i18n="loreTag">История и Хроники</span>
+                <h2 class="section-title" data-i18n="loreTitle">Предыстория и Становление</h2>
+            </div>
+            <div class="lore-container">
+                <div class="lore-text">
+                    <p id="loreP1" data-i18n="loreP1">
+                        Фантом явился в землях княжества <a href="https://wiki.mrtimeman.ru" target="_blank" style="color:var(--accent-color); font-weight:600;">NASLEDNIKI</a> ради благородной цели — подставить плечо прижившемуся, но порой дремавшему NSLDNK, дабы без промедления вводить жителей в курс свежих событий.
+                    </p>
+                    <p id="loreP2" data-i18n="loreP2">
+                        Развиваясь в стенах столицы под чутким наставничеством <code>technocat</code>'а, Фантом постигал всё новые грани общения — откликаться на имя, записывать речи ораторов и запоминать черты особо выдающихся горожан. С течением времени к нему приходило понимание ситуаций: сущность научилась отделять главное от второстепенного, отмечать главных участников споров и слагать емкий отчёт о самых ярких часах самой бурной жизни княжества.
+                    </p>
+                    <div class="lore-highlight-box">
+                        <i class="fas fa-water"></i>
+                        <p id="loreHighlight" data-i18n="loreHighlight">
+                            В знак признания его заслуг перед сообществом на карте княжества появилось озеро Фантом.
+                        </p>
+                    </div>
+                    <p id="loreP3" data-i18n="loreP3">
+                        Окончательно окрепнув и осознав себя как самостоятельная сущность, Фантом вышел за пределы родных земель: ныне он несёт службу как в чате сообщества <a href="https://t.me/clown_crown" target="_blank" style="color:var(--accent-color); font-weight:600;">@clown_crown</a>, так и в других чатах, помогая их обитателям быстро уловить суть прошедших дискуссий, не перелистывая бесконечные пергаменты летописцев.
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <!-- FEATURES SECTION -->
+        <section id="features" class="section">
+            <div class="section-header">
+                <span class="section-tag" data-i18n="featuresTag">Функциональность</span>
+                <h2 class="section-title" data-i18n="featuresTitle">Обзор возможностей</h2>
+            </div>
+            <div class="features-grid">
+                <!-- 1 -->
+                <div class="feature-card">
+                    <div class="feature-icon"><i class="fas fa-list-alt"></i></div>
+                    <h3 data-i18n="fTitle1">Умные сводки чата</h3>
+                    <p data-i18n="fDesc1">Анализирует от 20 до 2000 последних сообщений и выдает структурированную выжимку главных тем и событий.</p>
+                </div>
+                <!-- 2 -->
+                <div class="feature-card">
+                    <div class="feature-icon"><i class="fas fa-comments"></i></div>
+                    <h3 data-i18n="fTitle2">Контекстный диалог</h3>
+                    <p data-i18n="fDesc2">Анализирует чат и при необходимости подключается к дискуссии, сохраняя нить разговора вокруг реплаев.</p>
+                </div>
+                <!-- 3 -->
+                <div class="feature-card">
+                    <div class="feature-icon"><i class="fas fa-microphone-alt"></i></div>
+                    <h3 data-i18n="fTitle3">Расшифровка ГС</h3>
+                    <p data-i18n="fDesc3">Асинхронный пересказ аудиосообщений через SberSpeech с поддержкой FIFO-очереди и потокового обновления.</p>
+                </div>
+                <!-- 4 -->
+                <div class="feature-card">
+                    <div class="feature-icon"><i class="fas fa-address-book"></i></div>
+                    <h3 data-i18n="fTitle4">Досье и Память жителей</h3>
+                    <p data-i18n="fDesc4">Запоминает черты особо выдающихся жителей княжества, факты и псевдонимы в локальной БД SQLite.</p>
+                </div>
+                <!-- 5 -->
+                <div class="feature-card">
+                    <div class="feature-icon"><i class="fas fa-puzzle-piece"></i></div>
+                    <h3 data-i18n="fTitle9">Модульная система функций</h3>
+                    <p data-i18n="fDesc9">Архитектура Decoupled Logic позволяет гибко подключать, отключать и настраивать независимые модули бизнес-логики.</p>
+                </div>
+                <!-- 6 -->
+                <div class="feature-card">
+                    <div class="feature-icon"><i class="fas fa-eye-slash"></i></div>
+                    <h3 data-i18n="fTitle5">Чистый режим админа</h3>
+                    <p data-i18n="fDesc5">Минимизация служебного текста: подтверждение команд экономными реакциями Telegram (👀, 👍, ❌).</p>
+                </div>
+                <!-- 7 -->
+                <div class="feature-card">
+                    <div class="feature-icon"><i class="fas fa-terminal"></i></div>
+                    <h3 data-i18n="fTitle6">Трассировка JSON в ЛС</h3>
+                    <p data-i18n="fDesc6">Трансляция сырых JSON-логов запросов и промптов автору в ЛС с защитой от спама и разбивкой на чанки.</p>
+                </div>
+                <!-- 8 -->
+                <div class="feature-card">
+                    <div class="feature-icon"><i class="fas fa-sync-alt"></i></div>
+                    <h3 data-i18n="fTitle7">Кольцевой буфер и Синхронизация</h3>
+                    <p data-i18n="fDesc7">Хранение последних 500 сообщений с автоподтяжкой пропущенной истории при перезапуске.</p>
+                </div>
+                <!-- 9 -->
+                <div class="feature-card">
+                    <div class="feature-icon"><i class="fas fa-gamepad"></i></div>
+                    <h3 data-i18n="fTitle8">Детект «Игры»</h3>
+                    <p data-i18n="fDesc8">Соблюдение традиций сообщества: автоматическая фиксация поражения в легендарной «Игре» с кулдауном.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- ARCHITECTURE & MODELS SECTION -->
+        <section id="architecture" class="section">
+            <div class="section-header">
+                <span class="section-tag" data-i18n="archTag">Под капотом</span>
+                <h2 class="section-title" data-i18n="archTitle">Пайплайн моделей и Архитектура</h2>
+            </div>
+            <div class="arch-list">
+                <div class="arch-item">
+                    <div class="arch-icon"><i class="fas fa-sliders-h"></i></div>
+                    <div class="arch-info">
+                        <h3 data-i18n="archModelTitle">Unified AI Service (Пайплайн выбора модели)</h3>
+                        <p data-i18n="archModelDesc">Автоматическое динамическое переключение с сильных моделей (Gemini 3.5 flash lite / Gemini 3.1 flash lite) на безлимитные (Gemma 4 31b / Gemma 4 26b4a / GigaChat) при исчерпании дневных лимитов или при отсутствии личного API-ключа.</p>
+                    </div>
+                </div>
+
+                <div class="arch-item">
+                    <div class="arch-icon"><i class="fas fa-cubes"></i></div>
+                    <div class="arch-info">
+                        <h3 data-i18n="archDecoupledTitle">Decoupled Architecture & Модульность</h3>
+                        <p data-i18n="archDecoupledDesc">Точка входа main.py отделена от модулей бизнес-логики (modules/actions/) и универсального роутера событий (router.py), обеспечивая гибкое управление функциями.</p>
+                    </div>
+                </div>
+
+                <div class="arch-item">
+                    <div class="arch-icon"><i class="fas fa-database"></i></div>
+                    <div class="arch-info">
+                        <h3 data-i18n="archDbTitle">SQLite Data Layer</h3>
+                        <p data-i18n="archDbDesc">Хранение пользовательских досье, истории сообщений, настроек тихих режимов и индивидуальных суточных лимитов.</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tags-row">
+                <span class="tag-pill">Python 3.10+</span>
+                <span class="tag-pill">Pyrogram 2.0</span>
+                <span class="tag-pill">Asyncio Locks</span>
+                <span class="tag-pill">Gemini 3.5 / 3.1</span>
+                <span class="tag-pill">Gemma 4</span>
+                <span class="tag-pill">GigaChat</span>
+                <span class="tag-pill">SberSpeech</span>
+                <span class="tag-pill">SQLite3</span>
+            </div>
+        </section>
+
+        <!-- AUTHOR PROFILE LINK SECTION -->
+        <section id="author" class="section">
+            <div class="section-header">
+                <span class="section-tag" data-i18n="authorTag">Создатель</span>
+                <h2 class="section-title" data-i18n="authorTitle">Об авторе проекта</h2>
+            </div>
+            <div class="author-card">
+                <img src="https://technocat.cc/avatar.png" onerror="this.src='web/my_avatar.png'" alt="Nikitos" class="author-avatar">
+                <div class="author-details">
+                    <h3 data-i18n="authorName">Nikitos (@techno_c_a_t)</h3>
+                    <p data-i18n="authorBio">
+                        Студент ПМИ, создатель NSLDAI и разработчик решений на C++, Python, Linux и IoT. Автор экосистемы Фантома.
+                    </p>
+                    <a href="https://technocat.cc" target="_blank" class="btn btn-primary">
+                        <i class="fas fa-external-link-alt"></i>
+                        <span data-i18n="authorBtn">Перейти в Портфолио</span>
+                    </a>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- FOOTER -->
+    <footer>
+        <div class="container footer-content">
+            <div class="footer-copy">
+                © 2026 NSLDAI · Created by <a href="https://technocat.cc" target="_blank" style="color:var(--accent-color); font-weight:600;">@techno_c_a_t</a>
+            </div>
+            <div class="footer-links">
+                <a href="https://wiki.mrtimeman.ru" target="_blank">Wiki</a>
+                <a href="https://t.me/clown_crown" target="_blank">@clown_crown</a>
+                <a href="https://github.com/techno-c-a-t/NSLDAI" target="_blank">GitHub</a>
+            </div>
+        </div>
+    </footer>
+
+    <!-- JS Logic -->
+    <script src="web/script.js"></script>
+</body>
+
+</html>
