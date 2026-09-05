@@ -271,7 +271,7 @@ def get_history_from_db(chat_id: int, count: int) -> List[str]:
             rows = conn.execute(
                 f"SELECT author, text, category FROM {table_name} WHERE category != 'SERVICE' ORDER BY id DESC LIMIT ?", 
                 (count * 2,)
-            ).fetchall()
+            ).fetchall()[1:]
             filtered = []
             for r in rows:
                 if not is_admin_command_or_service(r[1]):
