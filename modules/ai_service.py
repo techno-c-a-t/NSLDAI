@@ -104,24 +104,39 @@ async def _request_openai_raw(
         "max_tokens": max_tokens
     }
 
-    if reasoning_effort and reasoning_effort not in ["low", "none", "off", "disable"]:
-        kwargs["reasoning_effort"] = reasoning_effort
+    # Поддержка уровня рассуждений (reasoning_effort) для Google OpenAI-compatible API ("minimal" или "high")
+    if reasoning_effort:
+        r_effort = str(reasoning_effort).lower()
+        if r_effort in ["off", "none", "disable", "0", "minimal"]:
+            kwargs["reasoning_effort"] = "minimal"
+        else:
+            kwargs["reasoning_effort"] = r_effort
+
+    # Трассировка полных JSON-запросов и ответов в консоль
+    try:
+        req_json = json.dumps(kwargs, indent=2, ensure_ascii=False)
+        logger.info(f"📡 [FULL JSON REQUEST] Model: {model}\n{req_json}")
+    except Exception:
+        pass
 
     try:
         response = await asyncio.to_thread(
             client.chat.completions.create,
             **kwargs
         )
-        return (response.choices[0].message.content or "").strip()
+        raw_text = (response.choices[0].message.content or "").strip()
+        logger.info(f"📩 [FULL JSON RESPONSE] Model: {model}\n{raw_text}")
+        return raw_text
     except Exception as e:
-        logger.warning(f"⚠️ [OPENAI API RETRY] Error with extra_body: {e}")
-        kwargs.pop("extra_body", None)
+        logger.warning(f"⚠️ [OPENAI API RETRY] Error ({e}). Retrying without reasoning_effort...")
         kwargs.pop("reasoning_effort", None)
         response = await asyncio.to_thread(
             client.chat.completions.create,
             **kwargs
         )
-        return (response.choices[0].message.content or "").strip()
+        raw_text = (response.choices[0].message.content or "").strip()
+        logger.info(f"📩 [FULL JSON RESPONSE RETRY] Model: {model}\n{raw_text}")
+        return raw_text
 
 # =====================================================================
 # АДАПТЕРЫ МОДЕЛЕЙ (MODEL ADAPTERS)
@@ -139,10 +154,10 @@ async def _invoke_gemini_model(
     """
     @brief Адаптер вызова моделей Gemini.
     """
-    messages = [
-        {"role": "system", "content": system_msg},
-        {"role": "user", "content": user_msg}
-    ]
+    messages = []
+    if system_msg:
+        messages.append({"role": "system", "content": system_msg})
+    messages.append({"role": "user", "content": user_msg})
     return await _request_openai_raw(model, messages, api_key, max_tokens, reasoning_effort=reasoning_effort, temperature=temperature)
 
 
@@ -158,14 +173,10 @@ async def _invoke_gemma_model(
     """
     @brief Адаптер вызова моделей Gemma.
     """
+    messages = []
     if system_msg:
-        messages = [
-            {"role": "user", "content": f"INSTRUCTION: {system_msg}\n\n{user_msg}"}
-        ]
-    else:
-        messages = [
-            {"role": "user", "content": user_msg}
-        ]
+        messages.append({"role": "system", "content": system_msg})
+    messages.append({"role": "user", "content": user_msg})
     raw_response = await _request_openai_raw(model, messages, api_key, max_tokens, reasoning_effort=reasoning_effort, temperature=temperature)
     return clean_ai_response(raw_response)
 
@@ -380,7 +391,14 @@ async def call_ai(
     # ---------------------------------------------------------------------
     # СТРОГОЕ ФОРМИРОВАНИЕ ЦЕПОЧКИ ОТКАТА (ТОЛЬКО ВНИЗ ПО ИЕРАРХИИ)
     # ---------------------------------------------------------------------
-    if model and model in cfg.AI_MODELS_CHAIN:
+    if model == "gemma-4-31b-it":
+        # При запросе Gemma 31B совершаем до 6 попыток с чередованием (31B <-> 26B по 3 раза)
+        models_to_try = [
+            "gemma-4-31b-it", "gemma-4-26b-a4b-it",
+            "gemma-4-31b-it", "gemma-4-26b-a4b-it",
+            "gemma-4-31b-it", "gemma-4-26b-a4b-it"
+        ]
+    elif model and model in cfg.AI_MODELS_CHAIN:
         start_idx = cfg.AI_MODELS_CHAIN.index(model)
         models_to_try = cfg.AI_MODELS_CHAIN[start_idx:]
     elif model:
