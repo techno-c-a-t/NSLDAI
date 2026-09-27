@@ -3,6 +3,8 @@ __pycache__/
 .env
 dump.txt
 
+data/
+
 # Databases
 *.db
 *.db-shm

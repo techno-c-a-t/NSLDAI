@@ -16,7 +16,7 @@ import modules.config as cfg
 import modules.database as db
 import modules.utils as utils
 from modules.router import router, EventType, EventContext
-from modules.actions import voice, tracer, sync
+from modules.actions import voice, tracer, sync, gigachat as giga
 
 # Настройка системного логирования
 logging.basicConfig(
@@ -55,6 +55,22 @@ async def sber_bot_edited_handler(client: Client, message: Message) -> None:
     logger.info(f"✏️ [СБЕР СПИЧ БОТ] Получена отредактированная транскрипция (id={message.id})")
     await voice.handle_sber_edit(client, message)
 
+@app.on_message(filters.chat(cfg.GIGACHAT_BOT), group=0)
+async def gigachat_bot_handler(client: Client, message: Message) -> None:
+    """
+    @brief Обработчик ответов от GigaChat Бота (Group 0).
+    """
+    logger.info(f"📩 [GIGACHAT БОТ] Получен ответ (id={message.id})")
+    await giga.handle_giga_response(message)
+
+@app.on_edited_message(filters.chat(cfg.GIGACHAT_BOT), group=0)
+async def gigachat_bot_edited_handler(client: Client, message: Message) -> None:
+    """
+    @brief Обработчик редактируемых ответов от GigaChat Бота (Group 0).
+    """
+    logger.info(f"✏️ [GIGACHAT БОТ] Получен отредактированный ответ (id={message.id})")
+    await giga.handle_giga_response(message)
+
 @app.on_message(group=1)
 async def main_handler(client: Client, message: Message) -> None:
     """
@@ -63,8 +79,9 @@ async def main_handler(client: Client, message: Message) -> None:
     """
     chat_id = message.chat.id
     
-    # Пропускаем технические ответы бота Сбер (они обрабатываются в sber_bot_handler)
-    if chat_id == cfg.SBER_BOT:
+    # Пропускаем технические ответы бота Сбер и бота GigaChat
+    is_giga = (chat_id == cfg.GIGACHAT_BOT) or (message.chat and message.chat.username and message.chat.username.lower() == str(cfg.GIGACHAT_BOT).lower().lstrip("@"))
+    if chat_id == cfg.SBER_BOT or is_giga:
         return
 
     # 1. ПРОВЕРКА БЕЛОГО СПИСКА ЧАТОВ (Строгий фильтр)

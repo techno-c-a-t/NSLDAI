@@ -52,6 +52,7 @@ class EventContext:
         
         import modules.config as cfg
         self.is_me: bool = bool(user and (user.username == cfg.MY_USERNAME or user.is_self))
+        self.client: Any = getattr(message, '_client', None)
         self.text: str = text if text is not None else (message.text.strip() if message and message.text else "")
         self.match: Optional[re.Match] = match
 

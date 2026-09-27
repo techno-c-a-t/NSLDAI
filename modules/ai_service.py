@@ -17,6 +17,7 @@ from typing import Optional, List, Dict, Any
 from openai import OpenAI
 import modules.config as cfg
 import modules.database as db
+import modules.utils as utils
 from modules.actions import gigachat as giga
 from modules.actions import tracer
 
@@ -184,6 +185,7 @@ async def _invoke_gemma_model(
 async def _invoke_gigachat_model(system_msg: str, user_msg: str, status_msg: Optional[Any]) -> str:
     """
     @brief Адаптер вызова fallback-модели Сбер GigaChat через Telegram Userbot Client.
+    @details Учитывает ограничение GigaChat на длину входящего сообщения <= 3900 символов (обрезает по границе слов).
     """
     if not status_msg or not hasattr(status_msg, '_client'):
         return "Не удалось задействовать GigaChat fallback (нет клиента)"
@@ -194,14 +196,23 @@ async def _invoke_gigachat_model(system_msg: str, user_msg: str, status_msg: Opt
         except Exception:
             pass
 
-    giga.giga_event.clear()
-    giga.giga_response = None
-    
-    prompt_for_giga = f"{system_msg}\n\nЗАПРОС:\n{user_msg}"
-    await status_msg._client.send_message(cfg.GIGACHAT_BOT, prompt_for_giga)
-    await asyncio.wait_for(giga.giga_event.wait(), timeout=60)
-    
-    return giga.giga_response or ""
+    async with giga.giga_lock:
+        giga.giga_event.clear()
+        giga.giga_response = None
+        
+        # Собираем промпт и обрезаем по словам до 3900 символов (лимит GigaChat)
+        raw_prompt = f"{system_msg}\n\nЗАПРОС:\n{user_msg}" if system_msg else user_msg
+        prompt_for_giga = utils.truncate_by_words(raw_prompt, max_len=3900)
+        
+        logger.info(f"📤 [GIGACHAT] Отправка запроса боту {cfg.GIGACHAT_BOT} ({len(prompt_for_giga)} симв.)...")
+        await status_msg._client.send_message(cfg.GIGACHAT_BOT, prompt_for_giga)
+        try:
+            await asyncio.wait_for(giga.giga_event.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            logger.warning("⚠️ [GIGACHAT] Таймаут ответа от GigaChat (60 сек).")
+            return "Сбер GigaChat не ответил вовремя (таймаут ожидания 60с)."
+        
+        return giga.giga_response or ""
 
 
 async def should_assistant_respond(
@@ -454,7 +465,7 @@ async def call_ai(
     # 2. FALLBACK: СБЕР GIGACHAT BOT (Если все модели в срезе не ответили)
     try:
         giga_res = await _invoke_gigachat_model(system_msg, user_msg, status_msg)
-        footer = "\n\n**> [Все доступные модели Google недоступны, использован Сбер GigaChat]**"
+        footer = "\n\n**> [Все доступные модели Google недоступны, использован Сбер GigaChat (контекст сильно уменьшен)]**"
         
         if chat_id:
             asyncio.create_task(tracer.queue_trace(chat_id, {
@@ -467,6 +478,12 @@ async def call_ai(
                 "response": giga_res
             }))
 
-        return giga_res + footer
+        total_res = giga_res + footer
+        if len(total_res) > 4000:
+            available_len = max(100, 4000 - len(footer) - 5)
+            giga_res = utils.truncate_by_words(giga_res, max_len=available_len) + "..."
+            total_res = giga_res + footer
+
+        return total_res
     except Exception as e:
         return f"Все доступные модели нейросетей недоступны: {e}"

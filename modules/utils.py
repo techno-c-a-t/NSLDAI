@@ -4,11 +4,61 @@
 """
 
 import logging
-from typing import Optional, Tuple, Any
+from typing import Optional, Tuple, Any, List
 import datetime
 import modules.database as db
 
 logger = logging.getLogger(__name__)
+
+def truncate_by_words(text: str, max_len: int = 3900) -> str:
+    """
+    @brief Обрезает текст по границе слов до max_len символов.
+    @param text Исходный текст.
+    @param max_len Максимальная допустимая длина в символах.
+    @return Обрезанный текст.
+    """
+    if not text or len(text) <= max_len:
+        return text
+    truncated = text[:max_len]
+    split_pos = max(truncated.rfind("\n"), truncated.rfind(" "))
+    if split_pos > int(max_len * 0.5):
+        truncated = truncated[:split_pos]
+    return truncated.rstrip()
+
+
+def split_text_by_words(text: str, max_chunk_size: int = 4000) -> List[str]:
+    """
+    @brief Безопасно нарезает длинный текст на блоки не более max_chunk_size символов (лимит Telegram 4096),
+           стараясь резать строго по границам абзацев или слов.
+    @param text Исходный длинный текст.
+    @param max_chunk_size Максимальный размер блока (по умолчанию 4000).
+    @return Список непустых чанков.
+    """
+    if not text or len(text) <= max_chunk_size:
+        return [text] if text else [""]
+
+    chunks: List[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= max_chunk_size:
+            chunks.append(remaining)
+            break
+
+        candidate = remaining[:max_chunk_size]
+        split_pos = candidate.rfind("\n")
+        if split_pos < int(max_chunk_size * 0.7):
+            split_pos = candidate.rfind(" ")
+
+        if split_pos <= 0:
+            split_pos = max_chunk_size
+
+        chunk = remaining[:split_pos].rstrip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[split_pos:].lstrip()
+
+    return chunks or [text[:max_chunk_size]]
+
 
 def format_author(msg: Any) -> str:
     """
@@ -77,7 +127,8 @@ async def set_reaction(message: Any, emoji: Optional[str] = None) -> bool:
 
 async def send_as_phantom(message: Any, text: str, edit_message: Optional[Any] = None, category: str = 'SERVICE') -> Any:
     """
-    @brief Безопасно отправляет или редактирует ответ от лица Фантома с автоматической записью в БД с категорией.
+    @brief Безопасно отправляет или редактирует ответ от лица Фантома с автоматической нарезкой
+           длинных текстов до 4000 символов (защита от лимита 4096 Telegram API) и записью в БД.
     @param message Исходное сообщение пользователя.
     @param text Текст ответа Фантома.
     @param edit_message Опциональное сообщение статуса для редактирования ('Вникаю...').
@@ -85,12 +136,36 @@ async def send_as_phantom(message: Any, text: str, edit_message: Optional[Any] =
     @return Объект отправленного/отредактированного сообщения Pyrogram Message.
     """
     chat_id = message.chat.id
+    chunks = split_text_by_words(text, max_chunk_size=4000)
+
+    last_sent = None
+    first_chunk = chunks[0] if chunks else ""
+
     if edit_message:
-        sent = await edit_message.edit_text(text)
-        db.update_message_text(chat_id, sent.id, text)
+        try:
+            sent = await edit_message.edit_text(first_chunk)
+            db.update_message_text(chat_id, sent.id, first_chunk)
+            last_sent = sent
+        except Exception as e:
+            logger.warning(f"Ошибка редактирования статуса сообщения {edit_message.id}: {e}. Отправка новым сообщением.")
+            sent = await message.reply_text(first_chunk)
+            data = await format_msg(sent)
+            if data:
+                db.save_message(chat_id, data[0], data[1], data[2], data[3], category=category)
+            last_sent = sent
     else:
-        sent = await message.reply_text(text)
+        sent = await message.reply_text(first_chunk)
         data = await format_msg(sent)
         if data:
             db.save_message(chat_id, data[0], data[1], data[2], data[3], category=category)
-    return sent
+        last_sent = sent
+
+    # Отправляем оставшиеся чанки, если текст превысил 4000 символов
+    for extra_chunk in chunks[1:]:
+        sent_extra = await message.reply_text(extra_chunk)
+        data_extra = await format_msg(sent_extra)
+        if data_extra:
+            db.save_message(chat_id, data_extra[0], data_extra[1], data_extra[2], data_extra[3], category=category)
+        last_sent = sent_extra
+
+    return last_sent

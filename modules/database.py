@@ -216,10 +216,9 @@ def get_service_message_ids_from_db(chat_id: int, limit: int = 10) -> List[int]:
                 (limit,)
             ).fetchall()
             return [r[0] for r in rows]
-    except sqlite3.OperationalError:
-        return []
     except sqlite3.OperationalError as e:
-        logger.warning(f"Ошибка удаления сообщений из БД: {e}")
+        logger.warning(f"Ошибка получения служебных сообщений из БД: {e}")
+        return []
 
 def get_max_id_in_db(chat_id: int) -> int:
     """
@@ -642,6 +641,7 @@ def set_chat_summary_limit(chat_id: int, limit: int) -> int:
             conn.execute("UPDATE chats_master SET summary_limit = ? WHERE chat_id = ?", (clamped_limit, chat_id))
     except sqlite3.OperationalError:
         pass
+    return clamped_limit
 
 # --- ФУНКЦИИ НАСТРОЕК ИИ-ИЗВЛЕКАТЕЛЯ ДОСЬЕ (GEMMA) ---
 
@@ -669,4 +669,3 @@ def set_chat_gemma_dossier_mode(chat_id: int, enabled: bool) -> None:
             conn.execute("UPDATE chats_master SET gemma_dossier_mode = ? WHERE chat_id = ?", (1 if enabled else 0, chat_id))
     except sqlite3.OperationalError:
         pass
-    return clamped_limit

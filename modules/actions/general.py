@@ -130,9 +130,9 @@ async def handle_reactions_and_lob(ctx: EventContext) -> bool:
     if ENABLE_EVIL_REACTIONS and is_evil_user(user):
         rand_val = random.random()
         if rand_val < 0.05:
-            await ctx.client.send_reaction(message.chat.id, message.id, "💋")
+            await utils.set_reaction(message, "💋")
         elif rand_val < 0.2:
-            await ctx.client.send_reaction(message.chat.id, message.id, "🏆")
+            await utils.set_reaction(message, "🏆")
 
     if "лоб" in text.lower():
         if is_evil_user(user):
@@ -141,7 +141,7 @@ async def handle_reactions_and_lob(ctx: EventContext) -> bool:
             user_name = user.first_name if user else "друг"
             await utils.send_as_phantom(message, f"Лоб, {user_name} )")
         else:
-            await ctx.client.send_reaction(message.chat.id, message.id, "💋")
+            await utils.set_reaction(message, "💋")
         return True
 
     return False
