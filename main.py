@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # Инициализация клиента Pyrogram
 app = Client(
-    "phantom_userbot",
+    cfg.SESSION_PATH,
     api_id=cfg.API_ID,
     api_hash=cfg.API_HASH,
     bot_token=cfg.BOT_TOKEN if cfg.BOT_TOKEN else None

@@ -4,9 +4,7 @@ services:
     container_name: nsldai-bot-prod
     restart: unless-stopped
     volumes:
-      - ./database.db:/app/database.db
-      - ./phantom_history.db:/app/phantom_history.db
-      - ./phantom_userbot.session:/app/phantom_userbot.session
+      - ./data:/app/data
     logging:
       driver: "json-file"
       options:

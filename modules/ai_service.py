@@ -23,8 +23,6 @@ from modules.actions import tracer
 
 logger = logging.getLogger(__name__)
 
-## @brief Базовый URL для обращения к Google Gemini API через OpenAI SDK
-BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 def clean_ai_response(text: str) -> str:
     """
@@ -94,7 +92,7 @@ async def _request_openai_raw(
 
     client = OpenAI(
         api_key=clean_key, 
-        base_url=BASE_URL,
+        base_url=cfg.BASE_URL,
         default_headers={"x-goog-api-key": clean_key}
     )
     

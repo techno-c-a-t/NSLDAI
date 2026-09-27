@@ -26,6 +26,10 @@ _speech_env = os.getenv("SBER_SPEECH_BOT", "5244379085").strip()
 SBER_SPEECH_BOT: Union[int, str] = int(_speech_env) if _speech_env.isdigit() else _speech_env
 SBER_BOT: Union[int, str] = SBER_SPEECH_BOT
 
+# Базовый URL для обращения к Google Gemini API через OpenAI SDK используя прокси
+BASE_URL: str = os.getenv("BASE_PROXIED_URL", "https://generativelanguage.googleapis.com/v1beta/openai")
+
+
 # ID целевого чата из .env
 TARGET_CHAT_ID: int = int(os.getenv("TARGET_CHAT_ID", "0"))
 
@@ -34,6 +38,9 @@ HISTORY_SIZE: int = int(os.getenv("HISTORY_SIZE", "2000"))
 
 # Путь к файлу локальной базы данных SQLite3
 DB_NAME: str = os.getenv("DB_NAME", "database.db")
+
+# Путь к файлу сессии Pyrogram Userbot
+SESSION_PATH: str = os.getenv("SESSION_PATH", "phantom_userbot")
 
 # Дефолтный API ключ Google Gemini (проверяем DEFAULT_API_KEY и GEMINI_API_KEY)
 DEFAULT_API_KEY: str = os.getenv("DEFAULT_API_KEY") or os.getenv("GEMINI_API_KEY") or ""
