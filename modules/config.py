@@ -59,12 +59,15 @@ if raw_allowed:
             except ValueError:
                 pass
 
-def is_chat_allowed(chat_id: int) -> bool:
+def is_chat_allowed(chat_id: int, is_private: bool = False) -> bool:
     """
     @brief Проверяет, разрешен ли чат для работы бота.
     @param chat_id ID чата.
-    @return True если чат в белом списке или списки пусты.
+    @param is_private Является ли чат личным сообщением (ЛС).
+    @return True если чат в белом списке, если это ЛС при ENABLE_PM_DIALOGS, или списки пусты.
     """
+    if is_private:
+        return ENABLE_PM_DIALOGS
     if not ALLOWED_CHATS and not ALLOWED_CHAT_IDS:
         return True
     return chat_id in ALLOWED_CHATS or chat_id in ALLOWED_CHAT_IDS
