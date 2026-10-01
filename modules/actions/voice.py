@@ -477,7 +477,7 @@ async def _async_summarize_and_update(
         footer = "\n</blockquote>"
 
     # Защита от лимита 4096 символов Telegram: гарантируем, что safe_full с тегами точно помещается в одно сообщение
-    max_full_len = 3900 - len(header) - len(footer)
+    max_full_len = 3800 - len(header) - len(footer)
     if len(safe_full) > max_full_len:
         safe_full = safe_full[:max_full_len].rsplit(" ", 1)[0] + "...\n[Текст обрезан по лимиту Telegram]"
 
