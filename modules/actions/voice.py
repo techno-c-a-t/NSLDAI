@@ -207,7 +207,7 @@ async def summarize_voice_transcription(
             user_api_key=None,
             system_msg=system_prompt,
             user_msg=user_prompt,
-            status_msg=status_msg,
+            status_msg=None,
             max_tokens=300,
             model="gemma-4-31b-it",
             chat_id=chat_id,
