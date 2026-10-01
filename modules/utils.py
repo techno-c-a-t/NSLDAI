@@ -174,3 +174,36 @@ async def send_as_phantom(message: Any, text: str, edit_message: Optional[Any] =
         last_sent = sent_extra
 
     return last_sent
+
+
+def patch_hydrogram_expandable_blockquotes() -> None:
+    """
+    @brief Патчит HTML-парсер Hydrogram для поддержки тега <blockquote expandable> / <blockquote collapsed>.
+    @details В релизе hydrogram-0.2.0 на PyPI в Parser.handle_starttag отсутствует обработка
+             атрибута expandable для blockquote, из-за чего флаг collapsed=True не выставлялся в
+             MessageEntityBlockquote. Данный патч гарантирует поддержку сворачиваемых цитат.
+    """
+    try:
+        import hydrogram.parser.html as html_mod
+        if getattr(html_mod.Parser, "_nsldai_patched", False):
+            return
+
+        orig_starttag = html_mod.Parser.handle_starttag
+
+        def patched_handle_starttag(self: Any, tag: str, attrs: Any) -> None:
+            orig_starttag(self, tag, attrs)
+            if tag == "blockquote":
+                attrs_dict = dict(attrs)
+                if "expandable" in attrs_dict or "collapsed" in attrs_dict:
+                    if "blockquote" in self.tag_entities and self.tag_entities["blockquote"]:
+                        entity = self.tag_entities["blockquote"][-1]
+                        setattr(entity, "collapsed", True)
+
+        html_mod.Parser.handle_starttag = patched_handle_starttag
+        html_mod.Parser._nsldai_patched = True
+        logger.info("🩹 [PATCH] Успешно активирован патч Hydrogram для <blockquote expandable>.")
+    except Exception as e:
+        logger.warning(f"⚠️ [PATCH] Не удалось применить патч Hydrogram: {e}")
+
+# Активируем патч при загрузке модуля
+patch_hydrogram_expandable_blockquotes()
