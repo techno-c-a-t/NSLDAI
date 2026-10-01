@@ -63,6 +63,10 @@ if raw_allowed:
             except ValueError:
                 pass
 
+# Диалоги в личных сообщениях (ЛС)
+ENABLE_PM_DIALOGS: bool = os.getenv("ENABLE_PM_DIALOGS", "True").lower() in ("true", "1", "yes")
+PM_SYNC_LIMIT: int = int(os.getenv("PM_SYNC_LIMIT", "100"))
+
 def is_chat_allowed(chat_id: int, is_private: bool = False) -> bool:
     """
     @brief Проверяет, разрешен ли чат для работы бота.
