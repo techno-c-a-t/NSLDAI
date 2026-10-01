@@ -469,10 +469,19 @@ async def _async_summarize_and_update(
     safe_full = html.escape(full_text.strip())
     if is_valid_shortened:
         safe_short = html.escape(shortened.strip())
-        final_output = f"<b>Если кратко:</b>\n{safe_short}\n\n<blockquote expandable>\n{safe_full}\n</blockquote>"
+        header = f"<b>Если кратко:</b>\n{safe_short}\n\n<blockquote expandable>\n"
+        footer = "\n</blockquote>"
     else:
         # Все круги ИИ не ответили — сырой текст не пропадает, а оформляется скрытой цитатой
-        final_output = f"<blockquote expandable>\n{safe_full}\n</blockquote>"
+        header = "<blockquote expandable>\n"
+        footer = "\n</blockquote>"
+
+    # Защита от лимита 4096 символов Telegram: гарантируем, что safe_full с тегами точно помещается в одно сообщение
+    max_full_len = 3900 - len(header) - len(footer)
+    if len(safe_full) > max_full_len:
+        safe_full = safe_full[:max_full_len].rsplit(" ", 1)[0] + "...\n[Текст обрезан по лимиту Telegram]"
+
+    final_output = f"{header}{safe_full}{footer}"
 
     asyncio.create_task(tracer.queue_trace(chat_id, {
         "event": "sber_speech_transcription",
@@ -546,14 +555,15 @@ async def _finalize_sber_transcription(context: VoiceContext) -> None:
         context.done_event.set()
     else:
         # 2. ДЛИННОЕ ГС (>30 слов): МГНОВЕННО заменяем «Расшифровываю...» на распознанный текст Сбера!
+        interim_text = full_text if len(full_text) <= 3800 else full_text[:3800].rsplit(" ", 1)[0] + "..."
         if context.status_msg and not clean_mode:
             try:
-                await context.status_msg.edit_text(f"{full_text}\n\n⏳ Сокращаю...")
+                await context.status_msg.edit_text(f"{interim_text}\n\n⏳ Сокращаю...")
                 db.update_message_text(chat_id, context.status_msg.id, full_text)
             except Exception as e:
                 logger.warning(f"⚠️ Не удалось вывести промежуточный текст ГС ({e}): {full_text[:50]}")
         elif not clean_mode:
-            sent_status = await utils.send_as_phantom(target_msg, f"{full_text}\n\n⏳ Сокращаю...", category="VOICE_TRANSCRIPTION")
+            sent_status = await utils.send_as_phantom(target_msg, f"{interim_text}\n\n⏳ Сокращаю...", category="VOICE_TRANSCRIPTION")
             context.status_msg = sent_status
 
         # МГНОВЕННО освобождаем воркер Сбера! Пошел таймер и обработка следующего ГС в очереди!
