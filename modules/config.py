@@ -20,6 +20,10 @@ BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
 # Мой личный username администратора (без символа @)
 MY_USERNAME: str = os.getenv("MY_USERNAME", "techno_c_a_t").lstrip("@")
 
+# Числовой ID администратора
+_my_id_env: str = os.getenv("MY_USER_ID", "37329040").strip()
+MY_USER_ID: int = int(_my_id_env) if _my_id_env.isdigit() else 37329040
+
 # Имя и ID ботов Сбера
 GIGACHAT_BOT: str = os.getenv("GIGACHAT_BOT", "gigachat_bot")
 _speech_env = os.getenv("SBER_SPEECH_BOT", "5244379085").strip()
