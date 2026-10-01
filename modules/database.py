@@ -82,6 +82,10 @@ def init_db() -> None:
                 conn.execute("ALTER TABLE chats_master ADD COLUMN clean_mode INTEGER DEFAULT 0")
             if 'gemma_dossier_mode' not in columns:
                 conn.execute("ALTER TABLE chats_master ADD COLUMN gemma_dossier_mode INTEGER DEFAULT 1")
+            if 'quota_mode' not in columns:
+                conn.execute("ALTER TABLE chats_master ADD COLUMN quota_mode INTEGER DEFAULT 0")
+            if 'requests_limit' not in columns:
+                conn.execute("ALTER TABLE chats_master ADD COLUMN requests_limit INTEGER DEFAULT 5")
 
             conn.execute('''CREATE TABLE IF NOT EXISTS daily_limits 
                             (user_id INTEGER, day TEXT, count INTEGER, PRIMARY KEY(user_id, day))''')
@@ -108,19 +112,63 @@ def register_chat(chat_id: int, chat_name: str = "Unregistered Chat", community_
     @param chat_name Человекочитаемое имя чата.
     @param community_id Опциональный ID сообщества/группы для объединенных чатов.
     """
-    cfg.ALLOWED_CHAT_IDS.add(int(chat_id))
     table_name = sanitize_table_name(chat_id)
     now = int(time.time())
+    is_private = int(chat_id) > 0
+    default_quota = 1 if is_private else 0
     try:
         with get_connection() as conn:
-            conn.execute('''INSERT INTO chats_master (chat_id, chat_name, community_id, is_active, created_at)
-                            VALUES (?, ?, ?, 1, ?)
-                            ON CONFLICT(chat_id) DO UPDATE SET chat_name=excluded.chat_name, is_active=1''',
-                         (chat_id, chat_name, community_id, now))
+            conn.execute('''INSERT INTO chats_master (chat_id, chat_name, community_id, is_active, quota_mode, created_at)
+                            VALUES (?, ?, ?, 1, ?, ?)
+                            ON CONFLICT(chat_id) DO UPDATE SET chat_name=excluded.chat_name''',
+                         (chat_id, str(chat_name), community_id, default_quota, now))
             conn.execute(f'''CREATE TABLE IF NOT EXISTS {table_name} 
                             (id INTEGER PRIMARY KEY, author TEXT, text TEXT, ts INTEGER)''')
-    except sqlite3.OperationalError as e:
+    except (sqlite3.OperationalError, sqlite3.ProgrammingError) as e:
         logger.warning(f"Ошибка регистрации чата {chat_id}: {e}")
+
+def message_exists(chat_id: int, msg_id: int) -> bool:
+    """
+    @brief Проверяет наличие сообщения с заданным ID в таблице конкретного чата.
+    """
+    table_name = sanitize_table_name(chat_id)
+    try:
+        with get_connection() as conn:
+            res = conn.execute(f"SELECT 1 FROM {table_name} WHERE id = ? LIMIT 1", (msg_id,)).fetchone()
+            return bool(res)
+    except sqlite3.OperationalError:
+        return False
+
+def get_chat_messages_count(chat_id: int) -> int:
+    """
+    @brief Возвращает общее количество сохраненных сообщений в таблице чата.
+    """
+    table_name = sanitize_table_name(chat_id)
+    try:
+        with get_connection() as conn:
+            res = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+            return int(res[0]) if res else 0
+    except sqlite3.OperationalError:
+        return 0
+
+def get_user_id_by_username(username: str) -> Optional[int]:
+    """
+    @brief Ищет ID пользователя по его юзернейму в мастер-таблицах досье.
+    """
+    clean_uname = (username or "").lstrip("@").strip().lower()
+    if not clean_uname:
+        return None
+    try:
+        with get_connection() as conn:
+            row = conn.execute(
+                "SELECT user_id FROM user_dossiers WHERE LOWER(username) = ? AND user_id > 0 LIMIT 1", 
+                (clean_uname,)
+            ).fetchone()
+            if row:
+                return int(row[0])
+    except sqlite3.OperationalError:
+        pass
+    return None
 
 def clear_db(chat_id: int) -> None:
     """
@@ -134,6 +182,23 @@ def clear_db(chat_id: int) -> None:
             register_chat(chat_id)
     except sqlite3.OperationalError:
         pass
+
+def clear_history_before(chat_id: int, max_id: int) -> None:
+    """
+    @brief Удаляет из персональной таблицы чата старые сообщения до указанного ID включительно.
+    @details Используется при синхронизации, когда оффлайн превысил лимит (2000 сообщений):
+             стираются только сообщения до гэпа, а досье, настройки чата и свежие сообщения сохраняются.
+    @param chat_id ID чата.
+    @param max_id Максимальный ID старых сообщений до гэпа.
+    """
+    if max_id <= 0:
+        return
+    table_name = sanitize_table_name(chat_id)
+    try:
+        with get_connection() as conn:
+            conn.execute(f"DELETE FROM {table_name} WHERE id <= ?", (max_id,))
+    except sqlite3.OperationalError as e:
+        logger.warning(f"Ошибка очистки старой истории до гэпа в чате {chat_id}: {e}")
 
 def save_message(
     chat_id: int, 
@@ -155,6 +220,7 @@ def save_message(
     """
     table_name = sanitize_table_name(chat_id)
     timestamp = int(ts.timestamp()) if hasattr(ts, 'timestamp') else int(ts)
+    history_limit = int(getattr(cfg, "MAX_SAVED_HISTORY", 20000))
     try:
         with get_connection() as conn:
             conn.execute(f'''CREATE TABLE IF NOT EXISTS {table_name} 
@@ -167,7 +233,7 @@ def save_message(
                 f"INSERT OR REPLACE INTO {table_name} (id, author, text, ts, category) VALUES (?, ?, ?, ?, ?)", 
                 (msg_id, author, text, timestamp, category)
             )
-            conn.execute(f"DELETE FROM {table_name} WHERE id NOT IN (SELECT id FROM {table_name} ORDER BY id DESC LIMIT 2000)")
+            conn.execute(f"DELETE FROM {table_name} WHERE id NOT IN (SELECT id FROM {table_name} ORDER BY id DESC LIMIT {history_limit})")
     except sqlite3.OperationalError as e:
         logger.warning(f"Ошибка сохранения сообщения в БД: {e}")
 
@@ -669,3 +735,108 @@ def set_chat_gemma_dossier_mode(chat_id: int, enabled: bool) -> None:
             conn.execute("UPDATE chats_master SET gemma_dossier_mode = ? WHERE chat_id = ?", (1 if enabled else 0, chat_id))
     except sqlite3.OperationalError:
         pass
+
+
+def activate_chat(chat_id: int) -> None:
+    """
+    @brief Активирует отслеживание чата в chats_master (is_active = 1) и добавляет его в белый список ALLOWED_CHAT_IDS.
+    @param chat_id ID чата.
+    """
+    cfg.ALLOWED_CHAT_IDS.add(int(chat_id))
+    try:
+        with get_connection() as conn:
+            conn.execute("UPDATE chats_master SET is_active = 1 WHERE chat_id = ?", (int(chat_id),))
+    except sqlite3.OperationalError as e:
+        logger.warning(f"Ошибка активации чата {chat_id}: {e}")
+
+
+def deactivate_chat(chat_id: int) -> None:
+    """
+    @brief Деактивирует отслеживание чата в chats_master (is_active = 0) и удаляет его из белого списка ALLOWED_CHAT_IDS.
+    @details База данных (таблицы сообщений, история, досье) НЕ удаляется!
+    @param chat_id ID чата.
+    """
+    cfg.ALLOWED_CHAT_IDS.discard(int(chat_id))
+    try:
+        with get_connection() as conn:
+            conn.execute("UPDATE chats_master SET is_active = 0 WHERE chat_id = ?", (int(chat_id),))
+    except sqlite3.OperationalError as e:
+        logger.warning(f"Ошибка деактивации чата {chat_id}: {e}")
+
+
+def is_chat_active(chat_id: int) -> bool:
+    """
+    @brief Проверяет статус активности отслеживания чата (is_active != 0).
+    @param chat_id ID чата.
+    @return False если чат явно отключен (is_active == 0).
+    """
+    try:
+        with get_connection() as conn:
+            row = conn.execute("SELECT is_active FROM chats_master WHERE chat_id = ?", (int(chat_id),)).fetchone()
+            if row is not None:
+                return bool(row[0])
+    except sqlite3.OperationalError:
+        pass
+    return True
+
+
+def get_chat_quota_mode(chat_id: int) -> bool:
+    """
+    @brief Проверяет, включен ли контроль суточных лимитов запросов к ИИ в данном чате.
+    @details Для ЛС (chat_id > 0) по умолчанию включен (True), для групп — выключен (False).
+    """
+    try:
+        with get_connection() as conn:
+            res = conn.execute("SELECT quota_mode FROM chats_master WHERE chat_id = ?", (chat_id,)).fetchone()
+        return bool(res[0]) if res and res[0] is not None else (int(chat_id) > 0)
+    except sqlite3.OperationalError:
+        return int(chat_id) > 0
+
+
+def set_chat_quota_mode(chat_id: int, enabled: bool) -> None:
+    """
+    @brief Включает или выключает контроль суточных лимитов запросов к ИИ для чата.
+    """
+    try:
+        with get_connection() as conn:
+            conn.execute("UPDATE chats_master SET quota_mode = ? WHERE chat_id = ?", (1 if enabled else 0, chat_id))
+    except sqlite3.OperationalError:
+        pass
+
+
+def get_chat_requests_limit(chat_id: int) -> int:
+    """
+    @brief Возвращает установленный суточный лимит запросов на участника в чате.
+    """
+    try:
+        with get_connection() as conn:
+            res = conn.execute("SELECT requests_limit FROM chats_master WHERE chat_id = ?", (chat_id,)).fetchone()
+        return int(res[0]) if res and res[0] is not None else getattr(cfg, "LIMIT_FREE_REQUESTS", 5)
+    except sqlite3.OperationalError:
+        return getattr(cfg, "LIMIT_FREE_REQUESTS", 5)
+
+
+def set_chat_requests_limit(chat_id: int, limit: int) -> int:
+    """
+    @brief Устанавливает суточный лимит запросов на участника в чате (от 1 до 500).
+    """
+    clamped = max(1, min(500, int(limit)))
+    try:
+        with get_connection() as conn:
+            conn.execute("UPDATE chats_master SET requests_limit = ? WHERE chat_id = ?", (clamped, chat_id))
+    except sqlite3.OperationalError:
+        pass
+    return clamped
+
+
+def get_user_daily_requests(user_id: int) -> int:
+    """
+    @brief Возвращает число запросов к ИИ, совершенных пользователем за сегодняшний день.
+    """
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    try:
+        with get_connection() as conn:
+            res = conn.execute("SELECT count FROM daily_limits WHERE user_id = ? AND day = ?", (user_id, today)).fetchone()
+            return int(res[0]) if res and res[0] is not None else 0
+    except sqlite3.OperationalError:
+        return 0

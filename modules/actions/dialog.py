@@ -43,6 +43,8 @@ async def handle_dialog(message: Any, text: str, username: Optional[str], user_i
         await voice.queue_voice_message(client, replied_msg, force=True, request_msg=message)
         return
     
+    is_private = (message.chat and message.chat.type and message.chat.type.name == "PRIVATE") or (chat_id > 0)
+    
     is_reply_to_phantom = bool(
         is_reply and 
         replied_msg and 
@@ -54,13 +56,14 @@ async def handle_dialog(message: Any, text: str, username: Optional[str], user_i
     # ---------------------------------------------------------------------
     # 1. ПРОВЕРКА ГАРАНТИРОВАННОГО ОТВЕТА ИЛИ ИИ-ВЕРИФИКАЦИЯ (GATEKEEPER)
     # ---------------------------------------------------------------------
-    is_guaranteed = is_direct_tag or is_reply_to_phantom
+    # В ЛС Gatekeeper ПОЛНОСТЬЮ ОТКЛЮЧЕН! В группах — по прямому тегу или реплаю
+    is_guaranteed = is_private or is_direct_tag or is_reply_to_phantom
 
     if clean_mode:
         await utils.set_reaction(message, "👀")
 
     if not is_guaranteed:
-        # Это случайное сообщение в чате, содержащее упоминание Фантома.
+        # Это случайное сообщение в группе, содержащее упоминание Фантома.
         # Вызываем Gatekeeper ИИ-классификатор (gemma-4-26b-a4b-it).
         target_text = replied_msg.text if (is_reply and replied_msg and replied_msg.text) else ""
         should_respond = await should_assistant_respond(user_id, username, user_key, text, target_text, chat_id=chat_id)
@@ -70,14 +73,33 @@ async def handle_dialog(message: Any, text: str, username: Optional[str], user_i
                 await utils.set_reaction(message, None)
             return
 
+    # Проверка суточного лимита запросов (если включен контроль квот для чата)
+    # ПРИ ПРЕВЫШЕНИИ ЛИМИТА: НЕ БЛОКИРУЕМ, А ДАУНГРЕЙДИМ НА БЕСПЛАТНУЮ GEMMA!
+    target_model: Optional[str] = None
+    limit_notice = ""
+    if db.get_chat_quota_mode(chat_id):
+        is_admin = bool((cfg.MY_USER_ID and user_id == cfg.MY_USER_ID) or (username and str(username).lower() == cfg.MY_USERNAME.lower()))
+        has_own_key = bool(cfg.USER_API_KEYS.get(username) or (clean_author_uname and cfg.USER_API_KEYS.get(clean_author_uname)))
+        if not is_admin and not has_own_key:
+            used_today = db.get_user_daily_requests(user_id)
+            chat_limit = db.get_chat_requests_limit(chat_id)
+            if used_today >= chat_limit:
+                target_model = "gemma-4-31b-it"
+                limit_notice = f"\n\n> ⚠️ [Суточный лимит Gemini исчерпан ({chat_limit} в сутки). Ответ сгенерирован бесплатной моделью Gemma]"
+
     # ---------------------------------------------------------------------
     # 2. АДАПТИВНАЯ СБОРКА КОНТЕКСТА ЧАТА И ПОДГРУЗКА РЕПЛАЕВ
     # ---------------------------------------------------------------------
     user_prompt = re.sub(r"(?i)@tech_phantom[,:\s]*", "", text).strip()
+    user_prompt = re.sub(r"(?i)^фантом(?:чик|ушка|ас)?[,:\s]*", "", user_prompt).strip()
     if not user_prompt:
         user_prompt = "Выскажи свое мнение по поводу сообщения выше."
 
+    replied_in_db = False
     if is_reply and replied_msg:
+        replied_in_db = db.message_exists(chat_id, replied_msg.id)
+
+    if is_reply and replied_msg and replied_in_db:
         replied_id = replied_msg.id
         msg_id = message.id
 
@@ -102,19 +124,26 @@ async def handle_dialog(message: Any, text: str, username: Optional[str], user_i
     processed_uids: Set[int] = set()
 
     author_dossier_data = db.get_user_dossier(chat_id, user_id)
+    if not author_dossier_data and clean_author_uname:
+        author_dossier_data = db.get_user_dossier_by_username(chat_id, clean_author_uname)
+
     if author_dossier_data:
-        processed_uids.add(user_id)
+        processed_uids.add(author_dossier_data.user_id or user_id)
         dossiers_to_inject.append(
             f"[СЛУЖЕБНОЕ ПРИВАТНОЕ ДОСЬЕ НА АВТОРА ЗАПРОСА: {author_name} ({clean_author_uname})]\n{author_dossier_data['dossier_text']}\n[КОНЕЦ ДОСЬЕ]"
         )
 
     if replied_msg and replied_msg.from_user and not replied_msg.from_user.is_self:
         target_uid = replied_msg.from_user.id
-        if target_uid not in processed_uids:
-            target_uname = (replied_msg.from_user.username or replied_msg.from_user.first_name).lstrip("@")
-            target_dos_data = db.get_user_dossier(chat_id, target_uid)
-            if target_dos_data:
-                processed_uids.add(target_uid)
+        target_uname = (replied_msg.from_user.username or replied_msg.from_user.first_name).lstrip("@")
+        target_dos_data = db.get_user_dossier(chat_id, target_uid)
+        if not target_dos_data and target_uname:
+            target_dos_data = db.get_user_dossier_by_username(chat_id, target_uname)
+
+        if target_dos_data:
+            effective_target_uid = target_dos_data.user_id or target_uid
+            if effective_target_uid not in processed_uids:
+                processed_uids.add(effective_target_uid)
                 dossiers_to_inject.append(
                     f"[СЛУЖЕБНОЕ ПРИВАТНОЕ ДОСЬЕ НА СОБЕСЕДНИКА В РЕПЛАЕ: {replied_msg.from_user.first_name} ({target_uname})]\n{target_dos_data['dossier_text']}\n[КОНЕЦ ДОСЬЕ]"
                 )
@@ -197,11 +226,12 @@ async def handle_dialog(message: Any, text: str, username: Optional[str], user_i
         system_msg=system_prompt,
         user_msg=full_user_prompt,
         status_msg=status_msg,
-        chat_id=chat_id
+        chat_id=chat_id,
+        model=target_model
     )
 
     # При сбое всех нейросетей выставляем плачущую реакцию 😭
-    if not response or "Все доступные модели" in response or response.startswith("Все нейронки легли"):
+    if not response or response.startswith("Ошибка: все модели") or response.startswith("Все нейронки легли") or "Все доступные модели нейросетей недоступны" in response:
         if clean_mode:
             await utils.set_reaction(message, "😭")
         elif status_msg:
@@ -213,7 +243,8 @@ async def handle_dialog(message: Any, text: str, username: Optional[str], user_i
         await utils.set_reaction(message, None)
 
     if response:
-        await utils.send_as_phantom(message, response, edit_message=status_msg, category="AI_RESPONSE")
+        final_response = response + limit_notice
+        await utils.send_as_phantom(message, final_response, edit_message=status_msg, category="AI_RESPONSE")
     else:
         if status_msg:
             try:

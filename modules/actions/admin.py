@@ -40,6 +40,7 @@ async def handle_dump_event(ctx: EventContext) -> None:
     """
     count_str = ctx.match.group(1) if ctx.match else "20"
     await do_dump(ctx.message, count_str)
+    
 
 
 @router.on(EventType.COMMAND, pattern=CLEANUP_PATTERN, admin_only=True, priority=20)
@@ -132,6 +133,7 @@ async def handle_allow_chat(ctx: EventContext) -> None:
     cfg.ALLOWED_CHAT_IDS.add(target_chat_id)
     chat_title = ctx.message.chat.title if target_chat_id == ctx.chat_id else f"Разрешенная группа ({target_chat_id})"
     db.register_chat(target_chat_id, chat_title or "Разрешенная группа")
+    db.activate_chat(target_chat_id)
     
     clean_mode = db.get_chat_clean_mode(ctx.chat_id)
     if clean_mode:
@@ -147,6 +149,117 @@ async def handle_allow_list(ctx: EventContext) -> None:
     """
     chats_str = ", ".join(map(str, cfg.ALLOWED_CHAT_IDS)) if cfg.ALLOWED_CHAT_IDS else "Разрешены ВСЕ чаты"
     await utils.send_as_phantom(ctx.message, f"📋 **БЕЛЫЙ СПИСОК ЧАТОВ:**\n{chats_str}")
+
+
+DISALLOW_CHAT_PATTERN: str = r"(?i)^фантом,?\s*(?:запрети\s+этот\s+чат|отключи\s+этот\s+чат|запрети\s+чат|отключи\s+чат|удали\s+этот\s+чат)(?:\s+(-?\d+))?\b"
+QUOTA_MODE_PATTERN: str = r"(?i)^фантом,?\s*(включи|выключи)\s+лимиты(?:\s+(@?[A-Za-z0-9_]+))?\b"
+QUOTA_LIMIT_SET_PATTERN: str = r"(?i)^фантом,?\s*(?:лимит\s+запросов|установи\s+лимит\s+запросов)(?:\s+(@?[A-Za-z0-9_]+))?\s+(\d+)$"
+PM_DIALOGS_TOGGLE_PATTERN: str = r"(?i)^фантом,?\s*(включи|выключи)\s+(?:диалоги\s+в\s+лс|лс)\b"
+
+
+@router.on(EventType.COMMAND, pattern=DISALLOW_CHAT_PATTERN, admin_only=True, priority=20)
+async def handle_disallow_chat(ctx: EventContext) -> None:
+    """
+    @brief Отключает отслеживание чата и исключает его из белого списка (is_active = 0).
+    @details База данных (таблицы сообщений, история, досье) НЕ удаляется! Бот просто перестает слушать этот чат.
+    """
+    text = ctx.text.strip()
+    match = re.search(DISALLOW_CHAT_PATTERN, text)
+    target_chat_id = int(match.group(1)) if (match and match.group(1)) else ctx.chat_id
+
+    db.deactivate_chat(target_chat_id)
+    clean_mode = db.get_chat_clean_mode(ctx.chat_id)
+    if clean_mode:
+        await utils.set_reaction(ctx.message, "👍")
+    else:
+        await utils.send_as_phantom(
+            ctx.message, 
+            f"Отслеживание группы `{target_chat_id}` отключено 🔴\n"
+            f"_(Все данные и история сохранены в базе данных, бот больше не читает и не отвечает в этом чате)_"
+        )
+
+
+@router.on(EventType.COMMAND, pattern=QUOTA_MODE_PATTERN, admin_only=True, priority=20)
+async def handle_quota_mode(ctx: EventContext) -> None:
+    """
+    @brief Включает или выключает суточный лимит запросов к ИИ в текущем чате или для конкретного пользователя.
+    """
+    enable = "включи" in ctx.text.lower()
+    match = re.search(QUOTA_MODE_PATTERN, ctx.text.strip())
+    target_str = match.group(2) if match and match.group(2) else None
+
+    target_chat_id = ctx.chat_id
+    target_label = "в этом чате"
+
+    if target_str:
+        clean_target = target_str.lstrip("@").strip()
+        if clean_target.lstrip("-").isdigit():
+            target_chat_id = int(clean_target)
+            target_label = f"для пользователя/чата `{target_chat_id}`"
+        else:
+            found_uid = db.get_user_id_by_username(clean_target)
+            if found_uid:
+                target_chat_id = found_uid
+                target_label = f"для @{clean_target}"
+            else:
+                target_label = f"для @{clean_target}"
+
+    db.set_chat_quota_mode(target_chat_id, enable)
+    limit = db.get_chat_requests_limit(target_chat_id)
+    clean_mode = db.get_chat_clean_mode(ctx.chat_id)
+    if clean_mode:
+        await utils.set_reaction(ctx.message, "👍")
+    else:
+        state_str = f"ВКЛЮЧЕН 🟢 (лимит: {limit} запр./сутки)" if enable else "ВЫКЛЮЧЕН 🔴 (безлимит)"
+        await utils.send_as_phantom(ctx.message, f"Контроль лимитов запросов {target_label}: {state_str}")
+
+
+@router.on(EventType.COMMAND, pattern=QUOTA_LIMIT_SET_PATTERN, admin_only=True, priority=20)
+async def handle_set_quota_limit(ctx: EventContext) -> None:
+    """
+    @brief Устанавливает суточный лимит запросов к ИИ на человека в данном чате или для конкретного пользователя.
+    """
+    match = re.search(QUOTA_LIMIT_SET_PATTERN, ctx.text.strip())
+    target_str = match.group(1) if match and match.group(1) else None
+    limit_val = int(match.group(2)) if match and match.group(2) else 5
+
+    target_chat_id = ctx.chat_id
+    target_label = "в этом чате"
+
+    if target_str:
+        clean_target = target_str.lstrip("@").strip()
+        if clean_target.lstrip("-").isdigit():
+            target_chat_id = int(clean_target)
+            target_label = f"для пользователя `{target_chat_id}`"
+        else:
+            found_uid = db.get_user_id_by_username(clean_target)
+            if found_uid:
+                target_chat_id = found_uid
+                target_label = f"для @{clean_target}"
+            else:
+                target_label = f"для @{clean_target}"
+
+    clamped = db.set_chat_requests_limit(target_chat_id, limit_val)
+    clean_mode = db.get_chat_clean_mode(ctx.chat_id)
+    if clean_mode:
+        await utils.set_reaction(ctx.message, "👍")
+    else:
+        await utils.send_as_phantom(ctx.message, f"Установлен суточный лимит {target_label}: {clamped} запросов 👌")
+
+
+@router.on(EventType.COMMAND, pattern=PM_DIALOGS_TOGGLE_PATTERN, admin_only=True, priority=20)
+async def handle_pm_dialogs_toggle(ctx: EventContext) -> None:
+    """
+    @brief Включает или выключает возможность диалогов в личных сообщениях с Фантомом.
+    """
+    enable = "включи" in ctx.text.lower()
+    cfg.ENABLE_PM_DIALOGS = enable
+    clean_mode = db.get_chat_clean_mode(ctx.chat_id)
+    if clean_mode:
+        await utils.set_reaction(ctx.message, "👍")
+    else:
+        status_text = "ВКЛЮЧЕНЫ 🟢 (Фантом слушает и отвечает в ЛС)" if enable else "ВЫКЛЮЧЕНЫ 🔴 (Фантом игнорирует сообщения в ЛС)"
+        await utils.send_as_phantom(ctx.message, f"Диалоги в личных сообщениях: {status_text}")
 
 
 async def do_dump(message: Any, count_str: str) -> None:

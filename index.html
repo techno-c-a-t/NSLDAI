@@ -165,14 +165,14 @@
                 <!-- 3 -->
                 <div class="feature-card">
                     <div class="feature-icon"><i class="fas fa-microphone-alt"></i></div>
-                    <h3 data-i18n="fTitle3">Расшифровка ГС</h3>
-                    <p data-i18n="fDesc3">Асинхронный пересказ аудиосообщений через SberSpeech с поддержкой FIFO-очереди и потокового обновления.</p>
+                    <h3 data-i18n="fTitle3">Расшифровка ГС и кружочков</h3>
+                    <p data-i18n="fDesc3">Асинхронное распознавание аудио через SaluteSpeech (Сбер) с интерактивным таймером очереди (1с / 5с), мгновенным выводом текста и сжатием через Gemma/GigaChat.</p>
                 </div>
                 <!-- 4 -->
                 <div class="feature-card">
                     <div class="feature-icon"><i class="fas fa-address-book"></i></div>
                     <h3 data-i18n="fTitle4">Досье и Память жителей</h3>
-                    <p data-i18n="fDesc4">Запоминает черты особо выдающихся жителей княжества, факты и псевдонимы в локальной БД SQLite.</p>
+                    <p data-i18n="fDesc4">Запоминает черты жителей княжества, факты, псевдонимы и контекст в локальной БД SQLite с поддержкой авто-извлечения фактов.</p>
                 </div>
                 <!-- 5 -->
                 <div class="feature-card">
@@ -183,8 +183,8 @@
                 <!-- 6 -->
                 <div class="feature-card">
                     <div class="feature-icon"><i class="fas fa-eye-slash"></i></div>
-                    <h3 data-i18n="fTitle5">Чистый режим админа</h3>
-                    <p data-i18n="fDesc5">Минимизация служебного текста: подтверждение команд экономными реакциями Telegram (👀, 👍, ❌).</p>
+                    <h3 data-i18n="fTitle5">Чистый режим и квоты</h3>
+                    <p data-i18n="fDesc5">Минимизация шума реакциями Telegram (👀, 👍, 😭), гибкие суточные квоты запросов к ИИ и управление белым списком чатов.</p>
                 </div>
                 <!-- 7 -->
                 <div class="feature-card">
@@ -195,8 +195,8 @@
                 <!-- 8 -->
                 <div class="feature-card">
                     <div class="feature-icon"><i class="fas fa-sync-alt"></i></div>
-                    <h3 data-i18n="fTitle7">Кольцевой буфер и Синхронизация</h3>
-                    <p data-i18n="fDesc7">Хранение последних 500 сообщений с автоподтяжкой пропущенной истории при перезапуске.</p>
+                    <h3 data-i18n="fTitle7">История и Синхронизация</h3>
+                    <p data-i18n="fDesc7">Хранение до 20 000 сообщений на чат в SQLite и безопасная подгрузка до 2 000 сообщений при стартовой синхронизации.</p>
                 </div>
                 <!-- 9 -->
                 <div class="feature-card">
@@ -217,8 +217,8 @@
                 <div class="arch-item">
                     <div class="arch-icon"><i class="fas fa-sliders-h"></i></div>
                     <div class="arch-info">
-                        <h3 data-i18n="archModelTitle">Unified AI Service (Пайплайн выбора модели)</h3>
-                        <p data-i18n="archModelDesc">Автоматическое динамическое переключение с сильных моделей (Gemini 3.5 flash lite / Gemini 3.1 flash lite) на безлимитные (Gemma 4 31b / Gemma 4 26b4a / GigaChat) при исчерпании дневных лимитов или при отсутствии личного API-ключа.</p>
+                        <h3 data-i18n="archModelTitle">Unified AI Service (Отказоустойчивый пайплайн)</h3>
+                        <p data-i18n="archModelDesc">3-этапный каскадный пайплайн: автоматическое переключение с Gemini 3.5 Flash Lite на каскад Gemma 4 (31B ⇄ 26B A4B) с нулевым оверхедом мышления, а затем на GigaChat при исчерпании лимитов или сбоях API.</p>
                     </div>
                 </div>
 
@@ -234,20 +234,20 @@
                     <div class="arch-icon"><i class="fas fa-database"></i></div>
                     <div class="arch-info">
                         <h3 data-i18n="archDbTitle">SQLite Data Layer</h3>
-                        <p data-i18n="archDbDesc">Хранение пользовательских досье, истории сообщений, настроек тихих режимов и индивидуальных суточных лимитов.</p>
+                        <p data-i18n="archDbDesc">Хранение пользовательских досье и псевдонимов, истории до 20 000 сообщений на чат, настроек тихих режимов и суточных лимитов.</p>
                     </div>
                 </div>
             </div>
 
             <div class="tags-row">
                 <span class="tag-pill">Python 3.10+</span>
-                <span class="tag-pill">Pyrogram 2.0</span>
+                <span class="tag-pill">Hydrogram / Pyrogram</span>
                 <span class="tag-pill">Asyncio Locks</span>
-                <span class="tag-pill">Gemini 3.5 / 3.1</span>
-                <span class="tag-pill">Gemma 4</span>
+                <span class="tag-pill">Gemini 3.5 Flash Lite</span>
+                <span class="tag-pill">Gemma 4 (31B / 26B)</span>
                 <span class="tag-pill">GigaChat</span>
-                <span class="tag-pill">SberSpeech</span>
-                <span class="tag-pill">SQLite3</span>
+                <span class="tag-pill">SaluteSpeech</span>
+                <span class="tag-pill">SQLite3 WAL</span>
             </div>
         </section>
 

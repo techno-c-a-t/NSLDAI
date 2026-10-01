@@ -125,7 +125,7 @@ async def set_reaction(message: Any, emoji: Optional[str] = None) -> bool:
     return False
 
 
-async def send_as_phantom(message: Any, text: str, edit_message: Optional[Any] = None, category: str = 'SERVICE') -> Any:
+async def send_as_phantom(message: Any, text: str, edit_message: Optional[Any] = None, category: str = 'SERVICE', parse_mode: Any = None) -> Any:
     """
     @brief Безопасно отправляет или редактирует ответ от лица Фантома с автоматической нарезкой
            длинных текстов до 4000 символов (защита от лимита 4096 Telegram API) и записью в БД.
@@ -133,6 +133,7 @@ async def send_as_phantom(message: Any, text: str, edit_message: Optional[Any] =
     @param text Текст ответа Фантома.
     @param edit_message Опциональное сообщение статуса для редактирования ('Вникаю...').
     @param category Категория сообщения ('SERVICE', 'AI_SUMMARY', 'AI_RESPONSE', 'VOICE_TRANSCRIPTION').
+    @param parse_mode Режим парсинга разметки (enums.ParseMode.HTML или None).
     @return Объект отправленного/отредактированного сообщения Pyrogram Message.
     """
     chat_id = message.chat.id
@@ -141,20 +142,24 @@ async def send_as_phantom(message: Any, text: str, edit_message: Optional[Any] =
     last_sent = None
     first_chunk = chunks[0] if chunks else ""
 
+    send_kwargs = {}
+    if parse_mode is not None:
+        send_kwargs["parse_mode"] = parse_mode
+
     if edit_message:
         try:
-            sent = await edit_message.edit_text(first_chunk)
+            sent = await edit_message.edit_text(first_chunk, **send_kwargs)
             db.update_message_text(chat_id, sent.id, first_chunk)
             last_sent = sent
         except Exception as e:
             logger.warning(f"Ошибка редактирования статуса сообщения {edit_message.id}: {e}. Отправка новым сообщением.")
-            sent = await message.reply_text(first_chunk)
+            sent = await message.reply_text(first_chunk, **send_kwargs)
             data = await format_msg(sent)
             if data:
                 db.save_message(chat_id, data[0], data[1], data[2], data[3], category=category)
             last_sent = sent
     else:
-        sent = await message.reply_text(first_chunk)
+        sent = await message.reply_text(first_chunk, **send_kwargs)
         data = await format_msg(sent)
         if data:
             db.save_message(chat_id, data[0], data[1], data[2], data[3], category=category)
@@ -162,7 +167,7 @@ async def send_as_phantom(message: Any, text: str, edit_message: Optional[Any] =
 
     # Отправляем оставшиеся чанки, если текст превысил 4000 символов
     for extra_chunk in chunks[1:]:
-        sent_extra = await message.reply_text(extra_chunk)
+        sent_extra = await message.reply_text(extra_chunk, **send_kwargs)
         data_extra = await format_msg(sent_extra)
         if data_extra:
             db.save_message(chat_id, data_extra[0], data_extra[1], data_extra[2], data_extra[3], category=category)

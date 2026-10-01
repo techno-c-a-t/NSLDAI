@@ -47,15 +47,28 @@ async def handle_summary_event(ctx: EventContext) -> None:
     else:
         status_msg = await ctx.message.reply_text("Разбираюсь...")
 
+    target_model: Optional[str] = None
+    limit_notice = ""
+    if db.get_chat_quota_mode(chat_id):
+        is_admin = bool((cfg.MY_USER_ID and ctx.user_id == cfg.MY_USER_ID) or (ctx.username and str(ctx.username).lower() == cfg.MY_USERNAME.lower()))
+        has_own_key = bool(cfg.USER_API_KEYS.get(ctx.username))
+        if not is_admin and not has_own_key:
+            used_today = db.get_user_daily_requests(ctx.user_id)
+            chat_limit = db.get_chat_requests_limit(chat_id)
+            if used_today >= chat_limit:
+                target_model = "gemma-4-31b-it"
+                limit_notice = f"\n\n> ⚠️ [Суточный лимит Gemini исчерпан ({chat_limit} в сутки). Ответ сгенерирован бесплатной моделью Gemma]"
+
     history = db.get_history_from_db(chat_id, count)
     user_key = cfg.USER_API_KEYS.get(ctx.username)
-    res = await get_chat_summary(history, user_key, ctx.user_id, ctx.username, count=count, status_msg=status_msg)
+    res = await get_chat_summary(history, user_key, ctx.user_id, ctx.username, count=count, status_msg=status_msg, model=target_model, chat_id=chat_id)
+    final_res = res + limit_notice
     
     if clean_mode:
         await utils.set_reaction(ctx.message, None)
-        await utils.send_as_phantom(ctx.message, f"**Нарыл (по {count} сообщениям):**\n\n{res}", category="AI_SUMMARY")
+        await utils.send_as_phantom(ctx.message, f"**Нарыл (по {count} сообщениям):**\n\n{final_res}", category="AI_SUMMARY")
     else:
-        await utils.send_as_phantom(ctx.message, f"**Нарыл (по {count} сообщениям):**\n\n{res}", edit_message=status_msg, category="AI_SUMMARY")
+        await utils.send_as_phantom(ctx.message, f"**Нарыл (по {count} сообщениям):**\n\n{final_res}", edit_message=status_msg, category="AI_SUMMARY")
 
 async def get_chat_summary(
     messages_list: List[str], 
@@ -63,7 +76,9 @@ async def get_chat_summary(
     user_id: int, 
     username: Optional[str] = None,
     count: int = 100, 
-    status_msg: Optional[Any] = None
+    status_msg: Optional[Any] = None,
+    model: Optional[str] = None,
+    chat_id: Optional[int] = None
 ) -> str:
     """
     @brief Отправляет последние сообщения истории чата в ИИ для получения аналитического свода.
@@ -74,7 +89,7 @@ async def get_chat_summary(
     context = "\n".join(messages_list)
     prompt = cfg.AI_PROMPTS["summary_user"].format(context=context, count=count)
     
-    res = await call_ai(user_id, username, user_api_key, cfg.AI_PROMPTS["summary_system"], prompt, status_msg=status_msg)    
+    res = await call_ai(user_id, username, user_api_key, cfg.AI_PROMPTS["summary_system"], prompt, status_msg=status_msg, model=model, chat_id=chat_id)    
     for p in ["вот что я нарыл:", "фантом:", "я нарыл:"]:
         if res.lower().startswith(p): 
             res = res[len(p):].strip()

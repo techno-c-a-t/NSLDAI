@@ -6,7 +6,7 @@
 import re
 import random
 import logging
-from typing import Any
+from typing import Any, Optional
 import modules.config as cfg
 import modules.database as db
 import modules.utils as utils
@@ -34,13 +34,21 @@ def is_evil_user(user: Any) -> bool:
     username_check = bool(user.username and user.username.lower() == target_username.lower())
     return name_check or username_check
 
+PM_HELP_PATTERN: str = r"(?i)^(?:гайд|помощь|help|команды)\b"
+
 @router.on(EventType.COMMAND, pattern=cfg.HELP_PATTERN, priority=20)
-async def handle_help_command(ctx: EventContext) -> None:
+@router.on(EventType.COMMAND, pattern=PM_HELP_PATTERN, priority=19)
+async def handle_help_command(ctx: EventContext) -> Optional[bool]:
     """
     @brief Отправляет ролевое справочное сообщение по командам Фантома с блоком статусов для Никитоса.
     @details Для Никитоса (is_me) динамически подтягиваются актуальные статусы без символа '@'.
     @param ctx Контекст события EventContext.
     """
+    is_private = (ctx.message.chat and ctx.message.chat.type and ctx.message.chat.type.name == "PRIVATE") or (ctx.chat_id > 0)
+    # Если в группе просто написали "помощь" без обращения к Фантому — не перехватываем
+    if not is_private and not re.search(cfg.HELP_PATTERN, ctx.text):
+        return False
+
     user_name = ctx.user.first_name if ctx.user else "друг"
     chat_id = ctx.chat_id
     clean_mode = db.get_chat_clean_mode(chat_id)
@@ -50,6 +58,7 @@ async def handle_help_command(ctx: EventContext) -> None:
         trace_mode = f"ВКЛЮЧЕНА 🟢 ({cfg.MY_USERNAME})" if db.get_chat_trace_mode(chat_id) else "ВЫКЛЮЧЕНА 🔴"
         voice_mode = "ВСЕ ГС (AUTO)" if db.get_chat_voice_mode(chat_id) == 'AUTO' else "ПО ЗАПРОСУ (ON_DEMAND)"
         clean_mode_str = "ВКЛЮЧЕН 🟢 (реакции 👀 👍)" if clean_mode else "ВЫКЛЮЧЕН 🔴 (текстовые сообщения)"
+        pm_dialogs_str = "ВКЛЮЧЕНЫ 🟢" if cfg.ENABLE_PM_DIALOGS else "ВЫКЛЮЧЕНЫ 🔴"
 
         dossiers_list = db.get_chat_dossiers_list(chat_id)
         if dossiers_list:
@@ -58,18 +67,23 @@ async def handle_help_command(ctx: EventContext) -> None:
         else:
             dossier_str = "нет данных"
 
+        quota_mode = db.get_chat_quota_mode(chat_id)
+        requests_limit = db.get_chat_requests_limit(chat_id)
+        quota_str = f"ВКЛЮЧЕН 🟢 ({requests_limit} запр./день на юзера)" if quota_mode else "ВЫКЛЮЧЕН 🔴 (безлимит)"
+
+        chat_type_label = "ЛС" if is_private else "ЧАТ"
         status_box = (
-            f"\n\n📊 **АКТУАЛЬНЫЙ СТАТУС НАСТРОЕК В ЭТОМ ЧАТЕ:**\n"
-            f"• **Чистый режим админа (Reactions):** {clean_mode_str}\n"
-            f"• **Длина сводки истории:** {summary_limit} сообщений (из 2000)\n"
-            f"• **Трассировка в ЛС:** {trace_mode}\n"
-            f"• **Режим расшифровки ГС:** {voice_mode}\n"
-            f"• **Досье заполнено на:** {dossier_str}\n"
+            f"\n\n📊 **СТАТУС ({chat_type_label}):**\n"
+            f"• ЛС: {pm_dialogs_str} | Чистый режим: {clean_mode_str}\n"
+            f"• Сводка: {summary_limit} сообщ. | Трассировка: {trace_mode}\n"
+            f"• Режим ГС: {voice_mode} | Лимиты: {quota_str}\n"
+            f"• Досье в БД: {dossier_str}"
         )
         
         await utils.send_as_phantom(ctx.message, f"Йо, {user_name}!\n\n{cfg.ADMIN_HELP_MESSAGE}{status_box}", category="SERVICE")
     else:
         await utils.send_as_phantom(ctx.message, f"Йо, {user_name}!\n\n{cfg.PUBLIC_HELP_MESSAGE}", category="SERVICE")
+    return True
 
 @router.on(EventType.COMMAND, pattern=CLEAN_MODE_ON_PATTERN, admin_only=True, priority=20)
 async def handle_clean_mode_on(ctx: EventContext) -> None:

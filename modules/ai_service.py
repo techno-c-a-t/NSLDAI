@@ -103,11 +103,20 @@ async def _request_openai_raw(
         "max_tokens": max_tokens
     }
 
-    # Поддержка уровня рассуждений (reasoning_effort) для Google OpenAI-compatible API ("minimal" или "high")
-    if reasoning_effort:
-        r_effort = str(reasoning_effort).lower()
+    # Поддержка уровня рассуждений (thinking / reasoning_effort) для Google OpenAI-compatible API
+    # Официальная документация: https://ai.google.dev/gemma/docs/core/gemma_on_gemini_api?hl=ru
+    # Для моделей Gemma 4 уровень мышления управляется через thinking_level: "high" (вкл) или "minimal" (выкл 100%).
+    # По умолчанию для Gemma всегда форсируем отключение мышления ("minimal"), если не запрошено иное.
+    eff = reasoning_effort
+    if "gemma" in model.lower() and not eff:
+        eff = "minimal"
+
+    if eff:
+        r_effort = str(eff).lower()
         if r_effort in ["off", "none", "disable", "0", "minimal"]:
             kwargs["reasoning_effort"] = "minimal"
+        elif r_effort in ["high", "on", "enable", "1"]:
+            kwargs["reasoning_effort"] = "high"
         else:
             kwargs["reasoning_effort"] = r_effort
 
@@ -127,15 +136,19 @@ async def _request_openai_raw(
         logger.info(f"📩 [FULL JSON RESPONSE] Model: {model}\n{raw_text}")
         return raw_text
     except Exception as e:
-        logger.warning(f"⚠️ [OPENAI API RETRY] Error ({e}). Retrying without reasoning_effort...")
-        kwargs.pop("reasoning_effort", None)
-        response = await asyncio.to_thread(
-            client.chat.completions.create,
-            **kwargs
-        )
-        raw_text = (response.choices[0].message.content or "").strip()
-        logger.info(f"📩 [FULL JSON RESPONSE RETRY] Model: {model}\n{raw_text}")
-        return raw_text
+        err_str = str(e).lower()
+        # Повторяем без reasoning_effort ТОЛЬКО если API явно жалуется на неподдерживаемый параметр
+        if ("reasoning_effort" in err_str or "unrecognized" in err_str or "invalid parameter" in err_str) and "reasoning_effort" in kwargs:
+            logger.warning(f"⚠️ [OPENAI API RETRY] Параметр reasoning_effort не поддерживается моделью {model} ({e}). Повтор без него...")
+            kwargs.pop("reasoning_effort", None)
+            response = await asyncio.to_thread(
+                client.chat.completions.create,
+                **kwargs
+            )
+            raw_text = (response.choices[0].message.content or "").strip()
+            logger.info(f"📩 [FULL JSON RESPONSE RETRY] Model: {model}\n{raw_text}")
+            return raw_text
+        raise e
 
 # =====================================================================
 # АДАПТЕРЫ МОДЕЛЕЙ (MODEL ADAPTERS)
@@ -166,17 +179,21 @@ async def _invoke_gemma_model(
     user_msg: str, 
     api_key: str, 
     max_tokens: int,
-    reasoning_effort: Optional[str] = None,
+    reasoning_effort: Optional[str] = "minimal",
     temperature: float = 0.95
 ) -> str:
     """
-    @brief Адаптер вызова моделей Gemma.
+    @brief Адаптер вызова моделей Gemma (gemma-4-31b-it, gemma-4-26b-a4b-it).
+    @details Для моделей Gemma процесс мышления (thinking) ВСЕГДА отключается на 100% 
+             (reasoning_effort="minimal" / thinking_level="minimal"), предотвращая задержки, утечки рассуждений и расход токенов.
+             Официальная документация Google: https://ai.google.dev/gemma/docs/core/gemma_on_gemini_api?hl=ru
     """
+    eff = reasoning_effort if reasoning_effort is not None else "minimal"
     messages = []
     if system_msg:
         messages.append({"role": "system", "content": system_msg})
     messages.append({"role": "user", "content": user_msg})
-    raw_response = await _request_openai_raw(model, messages, api_key, max_tokens, reasoning_effort=reasoning_effort, temperature=temperature)
+    raw_response = await _request_openai_raw(model, messages, api_key, max_tokens, reasoning_effort=eff, temperature=temperature)
     return clean_ai_response(raw_response)
 
 
@@ -261,7 +278,7 @@ async def should_assistant_respond(
             max_tokens=500, 
             model=classifier_model, 
             chat_id=chat_id,
-            reasoning_effort="low"
+            reasoning_effort="minimal"
         )
         cleaned_res = clean_ai_response(res).upper()
         decision = "YES" if "YES" in cleaned_res else "NO"
@@ -336,7 +353,7 @@ async def extract_mentioned_dossiers_via_gemma(
             max_tokens=60,
             model="gemma-4-26b-a4b-it",
             chat_id=chat_id,
-            reasoning_effort="low",
+            reasoning_effort="minimal",
             temperature=0.0
         )
         
@@ -399,27 +416,41 @@ async def call_ai(
 
     # ---------------------------------------------------------------------
     # СТРОГОЕ ФОРМИРОВАНИЕ ЦЕПОЧКИ ОТКАТА (ТОЛЬКО ВНИЗ ПО ИЕРАРХИИ)
+    # Пайплайн: Сильная (3.5) -> Еще сильная (3.1) -> Тройной цикл по 2 слабым (31b/26b x3) -> GigaChat (1 раз)
     # ---------------------------------------------------------------------
+    weak_models_cycle = [
+        "gemma-4-31b-it", "gemma-4-26b-a4b-it",
+        "gemma-4-31b-it", "gemma-4-26b-a4b-it",
+        "gemma-4-31b-it", "gemma-4-26b-a4b-it"
+    ]
+
     if model == "gemma-4-31b-it":
-        # При запросе Gemma 31B совершаем до 6 попыток с чередованием (31B <-> 26B по 3 раза)
+        models_to_try = list(weak_models_cycle)
+    elif model == "gemma-4-26b-a4b-it":
         models_to_try = [
-            "gemma-4-31b-it", "gemma-4-26b-a4b-it",
-            "gemma-4-31b-it", "gemma-4-26b-a4b-it",
-            "gemma-4-31b-it", "gemma-4-26b-a4b-it"
+            "gemma-4-26b-a4b-it", "gemma-4-31b-it",
+            "gemma-4-26b-a4b-it", "gemma-4-31b-it",
+            "gemma-4-26b-a4b-it", "gemma-4-31b-it"
         ]
+    elif model == "gemini-3.1-flash-lite":
+        models_to_try = ["gemini-3.1-flash-lite"] + list(weak_models_cycle)
+    elif model == "gemini-3.5-flash-lite":
+        models_to_try = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"] + list(weak_models_cycle)
     elif model and model in cfg.AI_MODELS_CHAIN:
         start_idx = cfg.AI_MODELS_CHAIN.index(model)
         models_to_try = cfg.AI_MODELS_CHAIN[start_idx:]
     elif model:
         models_to_try = [model]
     else:
-        models_to_try = list(cfg.AI_MODELS_CHAIN)
+        # Стандартный полный пайплайн: 2 сильные + 3 цикла по 2 слабым
+        models_to_try = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"] + list(weak_models_cycle)
 
     # 1. ТРИАЛ ПО СРЕЗУ ЦЕПОЧКИ МОДЕЛЕЙ (ТОЛЬКО ВНИЗ)
     for i, target_model in enumerate(models_to_try):
         try:
             if target_model.startswith("gemma"):
-                res = await _invoke_gemma_model(target_model, system_msg, user_msg, active_key, max_tokens, reasoning_effort=reasoning_effort, temperature=temperature)
+                g_effort = reasoning_effort if reasoning_effort is not None else "minimal"
+                res = await _invoke_gemma_model(target_model, system_msg, user_msg, active_key, max_tokens, reasoning_effort=g_effort, temperature=temperature)
             else:
                 res = await _invoke_gemini_model(target_model, system_msg, user_msg, active_key, max_tokens, reasoning_effort=reasoning_effort, temperature=temperature)
 
@@ -463,7 +494,7 @@ async def call_ai(
     # 2. FALLBACK: СБЕР GIGACHAT BOT (Если все модели в срезе не ответили)
     try:
         giga_res = await _invoke_gigachat_model(system_msg, user_msg, status_msg)
-        footer = "\n\n**> [Все доступные модели Google недоступны, использован Сбер GigaChat (контекст сильно уменьшен)]**"
+        footer = "\n\n**> [Модели Google временно недоступны, использован Сбер GigaChat (контекст сильно уменьшен)]**"
         
         if chat_id:
             asyncio.create_task(tracer.queue_trace(chat_id, {
@@ -484,4 +515,4 @@ async def call_ai(
 
         return total_res
     except Exception as e:
-        return f"Все доступные модели нейросетей недоступны: {e}"
+        return f"Ошибка: все модели нейросетей недоступны ({e})"

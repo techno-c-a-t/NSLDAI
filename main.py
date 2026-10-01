@@ -9,8 +9,8 @@ import asyncio
 import logging
 import re
 from typing import Any
-from pyrogram import Client, filters, idle
-from pyrogram.types import Message
+from hydrogram import Client, filters, idle
+from hydrogram.types import Message
 
 import modules.config as cfg
 import modules.database as db
@@ -71,21 +71,38 @@ async def gigachat_bot_edited_handler(client: Client, message: Message) -> None:
     logger.info(f"✏️ [GIGACHAT БОТ] Получен отредактированный ответ (id={message.id})")
     await giga.handle_giga_response(message)
 
+async def sync_pm_history_silently(client: Client, chat_id: int, limit: int = 100) -> None:
+    """
+    @brief Бесшумно подгружает последние N сообщений в ЛС без отправки уведомлений в чат.
+    """
+    try:
+        msgs = []
+        async for m in client.get_chat_history(chat_id, limit=limit):
+            author = utils.format_author(m)
+            m_text = m.text or m.caption or ""
+            msgs.append((m.id, author, m_text, m.date))
+        for item in reversed(msgs):
+            db.save_message(chat_id, *item)
+        logger.info(f"📥 [PM SYNC] Бесшумно подгружено {len(msgs)} сообщений в историю ЛС {chat_id}.")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка бесшумной подгрузки истории в ЛС {chat_id}: {e}")
+
 @app.on_message(group=1)
 async def main_handler(client: Client, message: Message) -> None:
     """
     @brief Главный перехватчик всех входящих сообщений Telegram (Group 1).
-    @details Реагирует СТРОГО на чаты из белого списка ALLOWED_CHAT_IDS.
+    @details Реагирует на чаты из белого списка ALLOWED_CHAT_IDS и разрешенные диалоги в ЛС.
     """
     chat_id = message.chat.id
+    is_private = (message.chat and message.chat.type and message.chat.type.name == "PRIVATE") or (chat_id > 0)
     
     # Пропускаем технические ответы бота Сбер и бота GigaChat
     is_giga = (chat_id == cfg.GIGACHAT_BOT) or (message.chat and message.chat.username and message.chat.username.lower() == str(cfg.GIGACHAT_BOT).lower().lstrip("@"))
     if chat_id == cfg.SBER_BOT or is_giga:
         return
 
-    # 1. ПРОВЕРКА БЕЛОГО СПИСКА ЧАТОВ (Строгий фильтр)
-    if not cfg.is_chat_allowed(chat_id):
+    # 1. ПРОВЕРКА БЕЛОГО СПИСКА ЧАТОВ И АКТИВНОСТИ (Строгий фильтр)
+    if not cfg.is_chat_allowed(chat_id, is_private=is_private) or not db.is_chat_active(chat_id):
         return
 
     text = message.text or message.caption or ""
@@ -94,41 +111,59 @@ async def main_handler(client: Client, message: Message) -> None:
     username = message.from_user.username if message.from_user else None
     is_self = bool(message.from_user and message.from_user.is_self)
 
-    logger.info(f"📩 [ВХОДЯЩЕЕ В РАЗРЕШЕННОМ ЧАТЕ] Chat: {chat_id} | Author: {author} (id={user_id}, is_self={is_self}) | Text: '{text[:80]}'")
+    logger.info(f"📩 [ВХОДЯЩЕЕ В РАЗРЕШЕННОМ ЧАТЕ] Chat: {chat_id} (is_private={is_private}) | Author: {author} (id={user_id}, is_self={is_self}) | Text: '{text[:80]}'")
 
     # Авто-регистрация чата в мастер-таблице БД
     chat_title = (message.chat.title or message.chat.first_name or f"Chat_{chat_id}") if message.chat else f"Chat_{chat_id}"
     db.register_chat(chat_id, chat_title)
 
+    # Для новых/пустых ЛС — бесшумно подгружаем до 100 последних сообщений
+    if is_private and not is_self and db.get_chat_messages_count(chat_id) == 0:
+        await sync_pm_history_silently(client, chat_id, limit=cfg.PM_SYNC_LIMIT)
+
     m_data = (message.id, author, text, message.date)
 
-    # 2. ПРОВЕРКА И ОБРАБОТКА РЕЖИМА СИНХРОНИЗАЦИИ (WAITING_SYNC / SYNCING)
+    # 2. ПРОВЕРКА И ОБРАБОТКА РЕЖИМА СИНХРОНИЗАЦИИ (WAITING_SYNC / QUEUED / SYNCING)
+    # Личные сообщения (ЛС) никогда не блокируются синхронизацией!
     sync_ctx = sync.get_sync_context(chat_id)
+    if is_private and sync_ctx.state != sync.STATE_NORMAL:
+        for m in sync_ctx.temp_buffer:
+            db.save_message(chat_id, *m)
+        sync_ctx.temp_buffer, sync_ctx.state, sync_ctx.checkpoint_max_id = [], sync.STATE_NORMAL, 0
+
     logger.info(f"🔄 [SYNC CHECK] Режим синхронизации чата {chat_id}: state={sync_ctx.state}")
 
-    if sync_ctx.state in [sync.STATE_WAITING_SYNC, sync.STATE_SYNCING]:
+    if not is_private and sync_ctx.state in [sync.STATE_WAITING_SYNC, sync.STATE_QUEUED, sync.STATE_SYNCING]:
         if is_self:
             return
 
         clean_text = text.strip().lower()
+        is_admin_sender = bool(
+            (cfg.MY_USER_ID and user_id == cfg.MY_USER_ID) or 
+            (username and str(username).lower() == cfg.MY_USERNAME.lower())
+        )
 
-        if sync_ctx.state == sync.STATE_WAITING_SYNC:
+        if sync_ctx.state == sync.STATE_WAITING_SYNC and is_admin_sender:
             if clean_text in ["да", "yes", "давай"]:
-                logger.info(f"✅ [SYNC] Получен ответ 'ДА' от {author}. Запуск офлайн-синхронизации!")
-                sync_ctx.state = sync.STATE_SYNCING
-                await message.reply_text("Начинаю загрузку пропущенной истории...")
+                logger.info(f"✅ [SYNC] Получен ответ 'ДА' от админа {author} в чате {chat_id}. Постановка в очередь...")
+                if sync.sync_lock.locked():
+                    sync_ctx.state = sync.STATE_QUEUED
+                    await message.reply_text("⏳ Чат добавлен в очередь синхронизации. Жду завершения текущего чата...")
+                else:
+                    sync_ctx.state = sync.STATE_SYNCING
+                    await message.reply_text("Начинаю загрузку пропущенной истории...")
                 asyncio.create_task(sync.run_sync(client, message))
                 return
-            elif clean_text in ["нет", "no", "отмена"]:
-                logger.info(f"🛑 [SYNC] Получен ответ 'НЕТ' от {author}. Синхронизация отменена.")
+            elif clean_text in ["нет", "no", "отмена", "пропусти"]:
+                logger.info(f"🛑 [SYNC] Получен ответ 'НЕТ' от админа {author}. Синхронизация отменена.")
                 for m in sync_ctx.temp_buffer:
                     db.save_message(chat_id, *m)
                 db.save_message(chat_id, *m_data)
-                sync_ctx.temp_buffer, sync_ctx.state = [], sync.STATE_NORMAL
+                sync_ctx.temp_buffer, sync_ctx.state, sync_ctx.checkpoint_max_id = [], sync.STATE_NORMAL, 0
                 await message.reply_text("Синхронизация отменена. Пишу с текущего момента.")
                 return
 
-        # Во время WAITING_SYNC и SYNCING кэшируем все текущие сообщения в temp_buffer и НЕ высылаем в ИИ
+        # Во время WAITING_SYNC, QUEUED и SYNCING кэшируем все текущие сообщения в temp_buffer и НЕ высылаем в ИИ
         logger.info(f"📦 [SYNC BUFFER] Сообщение id={message.id} кэшировано в буфер синхронизации чата {chat_id}.")
         sync_ctx.temp_buffer.append(m_data)
         return
@@ -154,12 +189,26 @@ async def main_handler(client: Client, message: Message) -> None:
 
     # ЭТАПЫ 2, 3, 4: Проверка реплаев на ГС, прямых обращений и имя (EventType.DIALOG)
     is_direct_tag = "@tech_phantom" in text.lower()
-    is_reply_to_phantom = bool(message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.is_self and re.search(cfg.PHANTOM_NAMES_PATTERN, text.lower()))
-    has_phantom_name = bool(re.search(cfg.PHANTOM_NAMES_PATTERN, text.lower()))
+    is_reply_to_phantom = bool(
+        message.reply_to_message and 
+        message.reply_to_message.from_user and 
+        message.reply_to_message.from_user.is_self
+    )
 
-    logger.info(f"🧐 [DIALOG TRIGGER CHECK] tag={is_direct_tag}, reply={is_reply_to_phantom}, name_regex={has_phantom_name}")
+    if is_private:
+        # В ЛС триггерится:
+        # 1) Начало строки с 'Фантом...'
+        # 2) Тег @tech_phantom
+        # 3) Прямой реплай на Фантома
+        starts_with_phantom = bool(re.match(r"(?i)^(?:фантом(?:чик|ушка|ас)?|phantom)\b", text.strip()))
+        should_trigger_dialog = starts_with_phantom or is_direct_tag or is_reply_to_phantom
+    else:
+        has_phantom_name = bool(re.search(cfg.PHANTOM_NAMES_PATTERN, text.lower()))
+        should_trigger_dialog = is_direct_tag or (is_reply_to_phantom and has_phantom_name) or has_phantom_name
 
-    if is_direct_tag or is_reply_to_phantom or has_phantom_name:
+    logger.info(f"🧐 [DIALOG TRIGGER CHECK] is_private={is_private}, trigger={should_trigger_dialog}, tag={is_direct_tag}, reply={is_reply_to_phantom}")
+
+    if should_trigger_dialog:
         logger.info(f"🔀 [STAGES 2, 3, 4] Диспетчеризация типа DIALOG...")
         if await router.dispatch(ctx, EventType.DIALOG):
             return
@@ -175,35 +224,69 @@ async def setup_background_tasks() -> None:
     try:
         logger.info("🔍 [PEER RESOLUTION] Подгрузка списка диалогов пользователя...")
         count = 0
-        async for _ in app.get_dialogs(limit=100):
+        cached_dialog_ids = set()
+        async for dialog in app.get_dialogs(limit=100):
             count += 1
+            if dialog.chat:
+                cached_dialog_ids.add(dialog.chat.id)
         logger.info(f"✅ [PEER RESOLUTION] Подгружено и закэшировано {count} диалогов.")
         
-        if cfg.TARGET_CHAT_ID:
-            sync_ctx = sync.get_sync_context(cfg.TARGET_CHAT_ID)
+        # Опрос разрешенных ГРУППОВЫХ чатов о синхронизации истории (ЛС исключены!)
+        target_chats = set()
+        if cfg.TARGET_CHAT_ID and cfg.TARGET_CHAT_ID < 0:
+            target_chats.add(cfg.TARGET_CHAT_ID)
+        if cfg.ALLOWED_CHAT_IDS:
+            target_chats.update(cid for cid in cfg.ALLOWED_CHAT_IDS if cid < 0)
+
+        for cid in target_chats:
+            if cached_dialog_ids and cid not in cached_dialog_ids:
+                logger.info(f"⏭️ [SYNC SKIP] Чат {cid} отсутствует в активных диалогах аккаунта. Пропуск.")
+                continue
+            sync_ctx = sync.get_sync_context(cid)
             sync_ctx.state = sync.STATE_WAITING_SYNC
-            logger.info(f"💬 Отправка стартового запроса синхронизации в TARGET_CHAT_ID ({cfg.TARGET_CHAT_ID})...")
+            logger.info(f"💬 Отправка стартового запроса синхронизации в чат {cid}...")
             try:
-                await app.send_message(cfg.TARGET_CHAT_ID, "Снова в сети. Nikitos, читать историю?")
-                logger.info("✅ Стартовый запрос синхронизации успешно отправлен.")
+                await app.send_message(cid, "Снова в сети. Nikitos, читать историю?")
+                logger.info(f"✅ Стартовый запрос синхронизации успешно отправлен в чат {cid}.")
             except Exception as e:
-                logger.warning(f"⚠️ Не удалось отправить приветственное сообщение: {e}")
+                logger.warning(f"⚠️ Не удалось отправить приветственное сообщение в чат {cid}: {e}")
     except Exception as e:
         logger.warning(f"⚠️ Ошибка при подгрузке диалогов: {e}")
 
     # Запуск фоновых воркеров ГС и трассировки
     asyncio.create_task(voice.sber_worker_loop(app))
-    asyncio.create_task(tracer.trace_worker_loop(app))
+    asyncio.create_task(tracer.tracer_worker_loop(app) if hasattr(tracer, 'tracer_worker_loop') else tracer.trace_worker_loop(app))
 
-if __name__ == "__main__":
-    logger.info("🚀 Запуск сессии Pyrogram Userbot...")
-    app.start()
-    app.loop.create_task(setup_background_tasks())
-    logger.info("🟢 Pyrogram Userbot полностью запущен и слушает разрешенные чаты!")
-    idle()
-    logger.info("🛑 Остановка сессии Pyrogram...")
+async def start_bot() -> None:
+    """
+    @brief Асинхронный запуск бота, фоновых задач и переход в режим ожидания сообщений (idle).
+    """
+    logger.info("🚀 Запуск сессии Hydrogram Userbot...")
+
+    # 0. Инициализация режимов ожидания синхронизации ДО старта приема входящих сообщений (СТРОГО групповые чаты cid < 0!)
+    target_sync_chats = set()
+    if cfg.TARGET_CHAT_ID and cfg.TARGET_CHAT_ID < 0:
+        target_sync_chats.add(cfg.TARGET_CHAT_ID)
+    if cfg.ALLOWED_CHAT_IDS:
+        target_sync_chats.update(cid for cid in cfg.ALLOWED_CHAT_IDS if cid < 0)
+
+    for cid in target_sync_chats:
+        sync.prepare_waiting_sync(cid)
+        logger.info(f"🔒 [SYNC CHECKPOINT] Чат {cid} переведен в WAITING_SYNC (checkpoint_max_id={sync.get_sync_context(cid).checkpoint_max_id})")
+
+    await app.start()
+    asyncio.create_task(setup_background_tasks())
+    logger.info("🟢 Hydrogram Userbot полностью запущен и слушает разрешенные чаты!")
+    await idle()
+    logger.info("🛑 Остановка сессии Hydrogram...")
     if getattr(app, "is_connected", False):
         try:
-            app.stop()
+            await app.stop()
         except Exception:
             pass
+
+if __name__ == "__main__":
+    try:
+        app.run(start_bot())
+    except (KeyboardInterrupt, SystemExit):
+        pass

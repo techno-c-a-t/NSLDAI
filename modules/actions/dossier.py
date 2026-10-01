@@ -6,87 +6,140 @@
 """
 
 import re
-from typing import Any
+from typing import Any, Tuple, Optional
 import modules.config as cfg
 import modules.database as db
 import modules.utils as utils
 from modules.router import router, EventType, EventContext
 
+
+def parse_dossier_input(raw_text: str) -> Optional[Tuple[str, str, str, str]]:
+    """
+    @brief Парсит структурированное сообщение управления досье по новому формату.
+    @details
+    Формат:
+      Команда (Фантом, записывай / дополни / вычеркивай)
+      тег без собачки, строго одно неразрывное слово
+      (один или более энтеров)
+      псевдонимы (каждый с новой строки, ровно один энтер между псевдонимами, могут состоять из 2-3 слов)
+      (два или более энтеров)
+      текст досье (любые пробелы, переносы строк, форматирование)
+    @return (command_type, username, aliases, dossier_text) или None.
+    """
+    match = re.match(r"(?i)^фантом,?\s*(записывай|дополни|вычеркивай)\b", raw_text.strip())
+    if not match:
+        return None
+
+    cmd = match.group(1).lower()
+    rest = raw_text.strip()[match.end():].strip()
+
+    if cmd == "вычеркивай":
+        uname = rest.split()[0].lstrip("@") if rest else ""
+        return cmd, uname, "", ""
+
+    blocks = re.split(r"\n\s*\n+", rest)
+    if not blocks or not blocks[0].strip():
+        return None
+
+    first_block_lines = [l.strip() for l in blocks[0].splitlines() if l.strip()]
+    if not first_block_lines:
+        return None
+
+    username = first_block_lines[0].lstrip("@").split()[0]
+    aliases_list = []
+    dossier_text = ""
+
+    if len(first_block_lines) > 1:
+        # Псевдонимы шли сразу под юзернеймом через один энтер
+        for line in first_block_lines[1:]:
+            clean_l = re.sub(r"(?i)^(также|псевдонимы|имена|клички)[:\s]*", "", line).strip()
+            if clean_l:
+                aliases_list.extend([a.strip() for a in clean_l.split(";") if a.strip()])
+        if len(blocks) > 1:
+            dossier_text = "\n\n".join(blocks[1:]).strip()
+    else:
+        # В первом блоке был только юзернейм
+        if len(blocks) == 2:
+            second_lines = [l.strip() for l in blocks[1].splitlines() if l.strip()]
+            if any(re.match(r"(?i)^(также|псевдонимы|имена|клички)", l) for l in second_lines):
+                for l in second_lines:
+                    clean_l = re.sub(r"(?i)^(также|псевдонимы|имена|клички)[:\s]*", "", l).strip()
+                    if clean_l:
+                        aliases_list.extend([a.strip() for a in clean_l.split(";") if a.strip()])
+            else:
+                dossier_text = blocks[1].strip()
+        elif len(blocks) >= 3:
+            second_lines = [l.strip() for l in blocks[1].splitlines() if l.strip()]
+            for l in second_lines:
+                clean_l = re.sub(r"(?i)^(также|псевдонимы|имена|клички)[:\s]*", "", l).strip()
+                if clean_l:
+                    aliases_list.extend([a.strip() for a in clean_l.split(";") if a.strip()])
+            dossier_text = "\n\n".join(blocks[2:]).strip()
+
+    # Дедупликация алиасов без учета регистра с сохранением исходного порядка
+    seen = set()
+    uniq_aliases = []
+    for a in aliases_list:
+        low = a.lower()
+        if low not in seen and low != username.lower():
+            seen.add(low)
+            uniq_aliases.append(a)
+
+    return cmd, username, ";".join(uniq_aliases), dossier_text
+
+
 @router.on(EventType.COMMAND, pattern=r"(?i)^фантом,\s*(записывай|дополни|вычеркивай)", admin_only=True, priority=30)
 async def handle_new_dossier_syntax_event(ctx: EventContext) -> bool:
     """
-    @brief Обработчик новых трех синтаксисов управления досье по первому строковому заголовку.
-    @details Критерий: Первая строка до абзаца на 100% совпадает с одной из 3 команд и отправитель админ.
-             Запрос гарантированно НЕ роутится на AI (возвращает True).
-    @param ctx Контекст события EventContext.
+    @brief Обработчик трех синтаксисов управления досье по первому строковому заголовку.
+    @details Поддерживает новый формат: тег -> псевдонимы (по строкам) -> 2 энтера -> текст досье.
     """
-    text = ctx.text
-    chat_id = ctx.chat_id
-    clean_mode = db.get_chat_clean_mode(chat_id)
-    lines = [line.strip() for line in text.split("\n") if line.strip()]
-
-    if not lines or len(lines) < 2:
+    parsed = parse_dossier_input(ctx.text)
+    if not parsed:
         return False
 
-    first_line_low = lines[0].lower()
-    target_username = lines[1].lstrip("@").strip()
+    cmd, target_username, aliases, dossier_text = parsed
+    if not target_username:
+        return False
+
+    chat_id = ctx.chat_id
+    clean_mode = db.get_chat_clean_mode(chat_id)
 
     # 1. СИНТАКСИС: "Фантом, записывай" (Создание / Перезапись)
-    if first_line_low == "фантом, записывай":
-        aliases = ""
-        dossier_lines = []
-
-        for line in lines[2:]:
-            if line.lower().startswith("также "):
-                aliases = line[6:].strip()
-            else:
-                dossier_lines.append(line)
-
-        dossier_text = "\n".join(dossier_lines) if dossier_lines else "Характеристика не заполнена."
-        
+    if cmd == "записывай":
         existing = db.get_user_dossier_by_username(chat_id, target_username)
         user_id = existing.user_id if existing else 0
+        final_text = dossier_text if dossier_text else "Характеристика не заполнена."
 
-        db.save_user_dossier(chat_id, user_id, target_username, dossier_text, aliases=aliases)
-        
+        db.save_user_dossier(chat_id, user_id, target_username, final_text, aliases=aliases)
+
         if clean_mode:
             await utils.set_reaction(ctx.message, "👍")
         else:
             reply_msg = f"Записал досье для {target_username}."
             if aliases:
-                reply_msg += f" Псевдонимы: {aliases}"
+                reply_msg += f"\nПсевдонимы: {aliases}"
             await utils.send_as_phantom(ctx.message, reply_msg)
         return True
 
     # 2. СИНТАКСИС: "Фантом, дополни" (Дополнение)
-    if first_line_low == "фантом, дополни":
-        new_aliases = ""
-        fact_lines = []
-
-        for line in lines[2:]:
-            if line.lower().startswith("также "):
-                new_aliases = line[6:].strip()
-            else:
-                fact_lines.append(line)
-
-        fact_text = "\n".join(fact_lines) if fact_lines else ""
-        
+    if cmd == "дополни":
         existing = db.get_user_dossier_by_username(chat_id, target_username)
         user_id = existing.user_id if existing else 0
 
-        db.append_user_dossier(chat_id, user_id, target_username, fact_text, new_aliases=new_aliases)
-        
+        db.append_user_dossier(chat_id, user_id, target_username, dossier_text, new_aliases=aliases)
+
         if clean_mode:
             await utils.set_reaction(ctx.message, "👍")
         else:
             reply_msg = f"Дополнил досье для {target_username}."
-            if new_aliases:
-                reply_msg += f" Новые псевдонимы: {new_aliases}"
+            if aliases:
+                reply_msg += f"\nНовые псевдонимы: {aliases}"
             await utils.send_as_phantom(ctx.message, reply_msg)
         return True
 
     # 3. СИНТАКСИС: "Фантом, вычеркивай" (Удаление)
-    if first_line_low == "фантом, вычеркивай":
+    if cmd == "вычеркивай":
         deleted = db.clear_user_dossier_by_username(chat_id, target_username)
         if clean_mode:
             await utils.set_reaction(ctx.message, "👍" if deleted else "❌")

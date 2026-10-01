@@ -51,7 +51,13 @@ class EventContext:
         self.username: Optional[str] = username if username is not None else (user.username if user else None)
         
         import modules.config as cfg
-        self.is_me: bool = bool(user and (user.username == cfg.MY_USERNAME or user.is_self))
+        check_id = bool(cfg.MY_USER_ID and ((user and user.id == cfg.MY_USER_ID) or (self.user_id == cfg.MY_USER_ID)))
+        check_uname = bool(
+            (user and user.username and str(user.username).lower() == cfg.MY_USERNAME.lower()) or 
+            (self.username and str(self.username).lower() == cfg.MY_USERNAME.lower())
+        )
+        check_self = bool(user and getattr(user, 'is_self', False))
+        self.is_me: bool = bool(check_id or check_uname or check_self)
         self.client: Any = getattr(message, '_client', None)
         self.text: str = text if text is not None else (message.text.strip() if message and message.text else "")
         self.match: Optional[re.Match] = match
