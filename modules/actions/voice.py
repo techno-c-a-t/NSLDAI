@@ -483,6 +483,17 @@ async def _async_summarize_and_update(
 
     final_output = f"{header}{safe_full}{footer}"
 
+    # Подробнейшая трассировка в консоль
+    logger.info(f"📐 [VOICE FORMATTING] header={header!r}, footer={footer!r}, full_len={len(safe_full)}, total_len={len(final_output)}")
+    try:
+        client = getattr(orig, "_client", None) or getattr(status_msg, "_client", None)
+        if client:
+            parsed = await client.parser.parse(final_output, enums.ParseMode.HTML)
+            entities_repr = [(type(e).__name__, getattr(e, "collapsed", None), e.offset, e.length) for e in parsed.get("entities", [])]
+            logger.info(f"🔍 [ENTITIES CHECK] Parsed entities count={len(entities_repr)}: {entities_repr}")
+    except Exception as pe:
+        logger.warning(f"⚠️ [ENTITIES CHECK] Не удалось распарсить entities: {pe}")
+
     asyncio.create_task(tracer.queue_trace(chat_id, {
         "event": "sber_speech_transcription",
         "message_id": orig.id,
@@ -493,12 +504,16 @@ async def _async_summarize_and_update(
 
     if status_msg and not clean_mode:
         try:
-            await status_msg.edit_text(final_output, parse_mode=enums.ParseMode.HTML)
+            logger.info(f"📤 [EDIT MESSAGE] Отправка edit_text в чат {chat_id} (msg_id={status_msg.id})...")
+            edited = await status_msg.edit_text(final_output, parse_mode=enums.ParseMode.HTML)
+            res_entities = [(type(e).__name__, getattr(e, "collapsed", None), e.offset, e.length) for e in (getattr(edited, "entities", None) or [])]
+            logger.info(f"✅ [EDIT MESSAGE SUCCESS] Сообщение id={edited.id} успешно отредактировано! Ответные entities Telegram: {res_entities}")
             db.update_message_text(chat_id, status_msg.id, final_output)
         except Exception as e:
-            logger.warning(f"⚠️ Не удалось отредактировать сообщение ГС после сжатия ({e}). Отправка отдельным...")
+            logger.exception(f"⚠️ Не удалось отредактировать сообщение ГС после сжатия ({e}). Отправка отдельным...")
             await utils.send_as_phantom(target_msg, final_output, category="VOICE_TRANSCRIPTION", parse_mode=enums.ParseMode.HTML)
     elif not clean_mode:
+        logger.info(f"📤 [SEND PHANTOM] Отправка новым сообщением в чат {chat_id}...")
         await utils.send_as_phantom(target_msg, final_output, category="VOICE_TRANSCRIPTION", parse_mode=enums.ParseMode.HTML)
 
 async def _finalize_sber_transcription(context: VoiceContext) -> None:
