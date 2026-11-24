@@ -107,7 +107,7 @@ async def trace_worker_loop(client: Any) -> None:
 
 # --- АДМИН-КОМАНДЫ ВКЛЮЧЕНИЯ/ВЫКЛЮЧЕНИЯ ТРАССИРОВКИ ---
 
-@router.on(EventType.COMMAND, pattern=r"(?i)^фантом,?\s*(включи трассировку|выключи трассировку|трассировка\s+(вкл|выкл))", admin_only=True, priority=20)
+@router.on(EventType.COMMAND, pattern=r"(?i)^фантом,?\s*(включи трассировку|выключи трассировку|трассировка\s+(?:в\s+лс\s+)?(вкл|выкл))", admin_only=True, priority=20)
 async def handle_trace_toggle_command(ctx: EventContext) -> None:
     """
     @brief Команда переключения режима трассировки логов в ЛС.

@@ -5,7 +5,9 @@
          с удалением из Telegram и базы SQLite, а также управление белым списком разрешенных чатов.
 """
 
+import asyncio
 import logging
+import os
 import re
 from typing import Any, List
 import modules.config as cfg
@@ -18,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 CLEANUP_PATTERN: str = r"(?i)^фантом,?\s*(приберись|почисти|убери за собой)\b"
 ALLOW_CHAT_PATTERN: str = r"(?i)^фантом,?\s*(?:разреши\s+этот\s+чат|добавь\s+этот\s+чат|разреши\s+чат)(?:\s+(-?\d+))?\b"
-ALLOW_LIST_PATTERN: str = r"(?i)^фантом,?\s*(список\s+разрешенных\s+чатов|белый\s+список|разрешенные\s+чаты)\b"
+ALLOW_LIST_PATTERN: str = r"(?i)^фантом,?\s*(список\s+(?:разрешенных\s+)?чатов|белый\s+список|разрешенные\s+чаты)\b"
 
 
 def is_service_message(text: str) -> bool:
@@ -38,7 +40,7 @@ async def handle_dump_event(ctx: EventContext) -> None:
     """
     @brief Обработчик события вызова команды дамп.
     """
-    count_str = ctx.match.group(1) if ctx.match else "20"
+    count_str = ctx.match.group(1) if (ctx.match and ctx.match.group(1)) else "20"
     await do_dump(ctx.message, count_str)
     
 
@@ -71,7 +73,7 @@ async def handle_cleanup_event(ctx: EventContext) -> None:
     if clean_mode:
         await utils.set_reaction(ctx.message, "👍")
     else:
-        await utils.send_as_phantom(ctx.message, f"Прибрался! Удалено {len(to_delete)} служебных сообщений (category='SERVICE') из чата и БД 🧹", category="SERVICE")
+        await utils.send_as_phantom(ctx.message, f"Прибрался! Удалено {len(to_delete)} служебных сообщений из чата и БД 🧹", category="SERVICE")
 
 
 @router.on(EventType.COMMAND, pattern=cfg.WIPE_PATTERN, admin_only=True, priority=20)
@@ -145,10 +147,18 @@ async def handle_allow_chat(ctx: EventContext) -> None:
 @router.on(EventType.COMMAND, pattern=ALLOW_LIST_PATTERN, admin_only=True, priority=20)
 async def handle_allow_list(ctx: EventContext) -> None:
     """
-    @brief Показывает список разрешенных чатов из белого списка.
+    @brief Показывает список разрешенных и зарегистрированных чатов.
     """
-    chats_str = ", ".join(map(str, cfg.ALLOWED_CHAT_IDS)) if cfg.ALLOWED_CHAT_IDS else "Разрешены ВСЕ чаты"
-    await utils.send_as_phantom(ctx.message, f"📋 **БЕЛЫЙ СПИСОК ЧАТОВ:**\n{chats_str}")
+    all_chats = db.get_all_chats()
+    if all_chats:
+        lines = [
+            f"• {'🟢' if c['is_active'] else '🔴'} `{c['chat_id']}` — {c['chat_name']}"
+            for c in all_chats
+        ]
+        chats_str = "\n".join(lines)
+    else:
+        chats_str = ", ".join(map(str, cfg.ALLOWED_CHAT_IDS)) if cfg.ALLOWED_CHAT_IDS else "Разрешены ВСЕ чаты"
+    await utils.send_as_phantom(ctx.message, f"📋 **СПИСОК ЧАТОВ:**\n{chats_str}")
 
 
 DISALLOW_CHAT_PATTERN: str = r"(?i)^фантом,?\s*(?:запрети\s+этот\s+чат|отключи\s+этот\s+чат|запрети\s+чат|отключи\s+чат|удали\s+этот\s+чат)(?:\s+(-?\d+))?\b"
@@ -198,11 +208,11 @@ async def handle_quota_mode(ctx: EventContext) -> None:
             target_label = f"для пользователя/чата `{target_chat_id}`"
         else:
             found_uid = db.get_user_id_by_username(clean_target)
-            if found_uid:
-                target_chat_id = found_uid
-                target_label = f"для @{clean_target}"
-            else:
-                target_label = f"для @{clean_target}"
+            if not found_uid:
+                await utils.send_as_phantom(ctx.message, f"❌ Пользователь @{clean_target} не найден в БД.")
+                return
+            target_chat_id = found_uid
+            target_label = f"для @{clean_target}"
 
     db.set_chat_quota_mode(target_chat_id, enable)
     limit = db.get_chat_requests_limit(target_chat_id)
@@ -233,11 +243,11 @@ async def handle_set_quota_limit(ctx: EventContext) -> None:
             target_label = f"для пользователя `{target_chat_id}`"
         else:
             found_uid = db.get_user_id_by_username(clean_target)
-            if found_uid:
-                target_chat_id = found_uid
-                target_label = f"для @{clean_target}"
-            else:
-                target_label = f"для @{clean_target}"
+            if not found_uid:
+                await utils.send_as_phantom(ctx.message, f"❌ Пользователь @{clean_target} не найден в БД.")
+                return
+            target_chat_id = found_uid
+            target_label = f"для @{clean_target}"
 
     clamped = db.set_chat_requests_limit(target_chat_id, limit_val)
     clean_mode = db.get_chat_clean_mode(ctx.chat_id)
@@ -254,6 +264,7 @@ async def handle_pm_dialogs_toggle(ctx: EventContext) -> None:
     """
     enable = "включи" in ctx.text.lower()
     cfg.ENABLE_PM_DIALOGS = enable
+    db.set_bot_setting("ENABLE_PM_DIALOGS", "1" if enable else "0")
     clean_mode = db.get_chat_clean_mode(ctx.chat_id)
     if clean_mode:
         await utils.set_reaction(ctx.message, "👍")
@@ -262,33 +273,139 @@ async def handle_pm_dialogs_toggle(ctx: EventContext) -> None:
         await utils.send_as_phantom(ctx.message, f"Диалоги в личных сообщениях: {status_text}")
 
 
+RESTART_PATTERN: str = r"(?i)^(?:фантом,?\s*)?(?:перезагрузись|рестарт|перезапуск|restart|reboot)\b"
+
+
+@router.on(EventType.COMMAND, pattern=RESTART_PATTERN, admin_only=True, priority=25)
+async def handle_pm_restart(ctx: EventContext) -> bool:
+    """
+    @brief Ручной рестарт бота/контейнера строго из ЛС администратора.
+    """
+    is_private = (
+        ctx.message
+        and ctx.message.chat
+        and ctx.message.chat.type
+        and ctx.message.chat.type.name == "PRIVATE"
+    ) or (ctx.chat_id > 0)
+    if not is_private:
+        return False
+
+    clean_mode = db.get_chat_clean_mode(ctx.chat_id)
+    if clean_mode:
+        await utils.set_reaction(ctx.message, "👍")
+    else:
+        await utils.send_as_phantom(ctx.message, "🔄 Перезагружаю бота...", category="SERVICE")
+
+    client = getattr(ctx.message, "_client", None)
+
+    async def _delayed_exit() -> None:
+        await asyncio.sleep(0.5)
+        if client and getattr(client, "is_connected", False):
+            try:
+                await client.stop()
+            except Exception:
+                pass
+        os._exit(1)
+
+    asyncio.create_task(_delayed_exit())
+    return True
+
+
+PROVIDER_SET_PATTERN: str = r"(?i)^(?:фантом,?\s*)?провайдер\s+(auto|openrouter|google|статус)\b"
+OPENROUTER_KEY_PATTERN: str = r"(?i)^(?:фантом,?\s*)?ключ\s+openrouter\s+(\S+)\s*$"
+
+
+@router.on(EventType.COMMAND, pattern=PROVIDER_SET_PATTERN, admin_only=True, priority=25)
+async def handle_provider_command(ctx: EventContext) -> bool:
+    """
+    @brief Настройка ИИ-провайдера (auto / openrouter / google / статус) строго в ЛС админа.
+    """
+    is_private = (
+        ctx.message
+        and ctx.message.chat
+        and ctx.message.chat.type
+        and ctx.message.chat.type.name == "PRIVATE"
+    ) or (ctx.chat_id > 0)
+    if not is_private:
+        return False
+
+    arg = ctx.match.group(1).lower() if ctx.match else "статус"
+    if arg == "статус":
+        or_set = "задан 🟢" if getattr(cfg, "OPENROUTER_API_KEY", "").strip() else "не задан 🔴"
+        g_set = "задан 🟢" if getattr(cfg, "DEFAULT_API_KEY", "").strip() else "не задан 🔴"
+        await utils.send_as_phantom(
+            ctx.message,
+            f"⚙️ **Провайдер ИИ:** `{cfg.AI_PROVIDER_MODE}`\n"
+            f"• OpenRouter (`baidu/ernie-5.5-flash-preview`): {or_set}\n"
+            f"• Google Gemini/Gemma: {g_set}",
+            category="SERVICE",
+        )
+        return True
+
+    cfg.AI_PROVIDER_MODE = arg
+    db.set_bot_setting("AI_PROVIDER_MODE", arg)
+    await utils.send_as_phantom(ctx.message, f"✅ Режим провайдера ИИ переключен на `{arg}`.", category="SERVICE")
+    return True
+
+
+@router.on(EventType.COMMAND, pattern=OPENROUTER_KEY_PATTERN, admin_only=True, priority=25)
+async def handle_openrouter_key_command(ctx: EventContext) -> bool:
+    """
+    @brief Сохраняет OPENROUTER_API_KEY строго из ЛС админа.
+    """
+    is_private = (
+        ctx.message
+        and ctx.message.chat
+        and ctx.message.chat.type
+        and ctx.message.chat.type.name == "PRIVATE"
+    ) or (ctx.chat_id > 0)
+    if not is_private:
+        return False
+
+    new_key = ctx.match.group(1).strip() if ctx.match else ""
+    if not new_key:
+        return False
+
+    cfg.OPENROUTER_API_KEY = new_key
+    db.set_bot_setting("OPENROUTER_API_KEY", new_key)
+    await utils.send_as_phantom(ctx.message, "✅ Ключ OpenRouter сохранён и активирован.", category="SERVICE")
+    return True
+
+
 async def do_dump(message: Any, count_str: str) -> None:
     """
     @brief Выгружает историю сообщений текущего чата в консоль, файл dump.txt или в ЛС (при включенной трассировке).
     """
-    count = int(count_str)
+    count = int(count_str) if count_str else 20
     chat_id = message.chat.id
 
-    if count > cfg.HISTORY_SIZE: 
-        resp = "Много хочешь"
+    if count > cfg.HISTORY_SIZE:
+        await utils.send_as_phantom(message, "Много хочешь")
+        return
+
+    hist = db.get_history_from_db(chat_id, count)
+    if not hist:
+        await utils.send_as_phantom(message, "В базе пока пусто.")
+        return
+
+    if db.get_chat_trace_mode(chat_id):
+        await tracer.queue_trace(chat_id, {
+            "event": "dump_history",
+            "count": len(hist),
+            "history": hist
+        })
+        resp = f"Дамп ({len(hist)} сообщ.) выгружен и отправлен в ЛС отформатированными JSON-блоками 📩"
+    elif count <= 20:
+        print("\n--- ДАМП ---\n" + "\n".join(hist))
+        resp = f"В консоли ({len(hist)} сообщ.)"
     else:
-        hist = db.get_history_from_db(chat_id, count)
-        if len(hist) < count: 
-            resp = f"Помню только {len(hist)}"
-        else:
-            if db.get_chat_trace_mode(chat_id):
-                await tracer.queue_trace(chat_id, {
-                    "event": "dump_history",
-                    "count": count,
-                    "history": hist
-                })
-                resp = "Дамп выгружен и отправлен в ЛС отформатированными JSON-блоками 📩"
-            else:
-                if count <= 20: 
-                    print(f"\n--- ДАМП ---\n" + "\n".join(hist))
-                    resp = "В консоли"
-                else:
-                    with open("dump.txt", "w", encoding="utf-8") as f: 
-                        f.write("\n".join(hist))
-                    resp = "В файле dump.txt"
+        with open("dump.txt", "w", encoding="utf-8") as f:
+            f.write("\n".join(hist))
+        if hasattr(message, "reply_document"):
+            try:
+                await message.reply_document("dump.txt", caption=f"Дамп последних {len(hist)} сообщений")
+                return
+            except Exception:
+                pass
+        resp = f"В файле dump.txt ({len(hist)} сообщ.)"
     await utils.send_as_phantom(message, resp)

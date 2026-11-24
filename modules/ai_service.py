@@ -80,21 +80,28 @@ async def _request_openai_raw(
     api_key: str, 
     max_tokens: int = 3000,
     reasoning_effort: Optional[str] = None,
-    temperature: float = 0.95
+    temperature: float = 0.95,
+    base_url: Optional[str] = None,
+    is_openrouter: bool = False,
 ) -> str:
     """
-    @brief Базовый метод отправки сообщений в Google OpenAI-compatible API.
+    @brief Базовый метод отправки сообщений в OpenAI-compatible API (Google Gemini или OpenRouter).
     @details Поддерживает выбор уровня ризонинга и температуры генерации.
     """
-    clean_key = (api_key or "").strip()
-    if not clean_key:
-        clean_key = (cfg.DEFAULT_API_KEY or "").strip()
-
-    client = OpenAI(
-        api_key=clean_key, 
-        base_url=cfg.BASE_URL,
-        default_headers={"x-goog-api-key": clean_key}
-    )
+    if is_openrouter:
+        clean_key = (api_key or cfg.OPENROUTER_API_KEY or "").strip()
+        target_base_url = base_url or cfg.OPENROUTER_BASE_URL
+        client = OpenAI(api_key=clean_key, base_url=target_base_url)
+    else:
+        clean_key = (api_key or "").strip()
+        if not clean_key:
+            clean_key = (cfg.DEFAULT_API_KEY or "").strip()
+        target_base_url = base_url or cfg.BASE_URL
+        client = OpenAI(
+            api_key=clean_key, 
+            base_url=target_base_url,
+            default_headers={"x-goog-api-key": clean_key}
+        )
     
     kwargs: Dict[str, Any] = {
         "model": model,
@@ -278,7 +285,8 @@ async def should_assistant_respond(
             max_tokens=500, 
             model=classifier_model, 
             chat_id=chat_id,
-            reasoning_effort="minimal"
+            reasoning_effort="minimal",
+            count_quota=False,
         )
         cleaned_res = clean_ai_response(res).upper()
         decision = "YES" if "YES" in cleaned_res else "NO"
@@ -354,7 +362,8 @@ async def extract_mentioned_dossiers_via_gemma(
             model="gemma-4-26b-a4b-it",
             chat_id=chat_id,
             reasoning_effort="minimal",
-            temperature=0.0
+            temperature=0.0,
+            count_quota=False,
         )
         
         clean_res = re.sub(r"(?s)<thought>.*?</thought>", "", gemma_res).strip()
@@ -401,7 +410,8 @@ async def call_ai(
     model: Optional[str] = None,
     chat_id: int = 0,
     reasoning_effort: Optional[str] = None,
-    temperature: float = 0.95
+    temperature: float = 0.95,
+    count_quota: bool = True,
 ) -> str:
     """
     @brief Главная функция обращения к ИИ с каскадом отката СТРОГО ВНИЗ ПО ИЕРАРХИИ.
@@ -442,21 +452,47 @@ async def call_ai(
     elif model:
         models_to_try = [model]
     else:
-        # Стандартный полный пайплайн: 2 сильные + 3 цикла по 2 слабым
-        models_to_try = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"] + list(weak_models_cycle)
+        provider_mode = getattr(cfg, "AI_PROVIDER_MODE", "auto").lower()
+        has_or_key = bool(getattr(cfg, "OPENROUTER_API_KEY", "").strip())
+        if provider_mode == "openrouter":
+            models_to_try = ["baidu/ernie-5.5-flash-preview"]
+        elif provider_mode == "google":
+            models_to_try = ["gemini-3.1-flash-lite"] + list(weak_models_cycle)
+        else:
+            # auto: сначала ERNIE на OpenRouter (если есть ключ), затем Google-цепочка
+            models_to_try = (["baidu/ernie-5.5-flash-preview"] if has_or_key else []) + ["gemini-3.1-flash-lite"] + list(weak_models_cycle)
 
     # 1. ТРИАЛ ПО СРЕЗУ ЦЕПОЧКИ МОДЕЛЕЙ (ТОЛЬКО ВНИЗ)
     for i, target_model in enumerate(models_to_try):
+        is_openrouter_model = "/" in target_model
         try:
-            if target_model.startswith("gemma"):
+            if is_openrouter_model:
+                or_key = getattr(cfg, "OPENROUTER_API_KEY", "").strip()
+                if not or_key:
+                    raise RuntimeError("OPENROUTER_API_KEY не задан")
+                messages = []
+                if system_msg:
+                    messages.append({"role": "system", "content": system_msg})
+                messages.append({"role": "user", "content": user_msg})
+                res = await _request_openai_raw(
+                    target_model,
+                    messages,
+                    or_key,
+                    max_tokens,
+                    reasoning_effort=reasoning_effort,
+                    temperature=temperature,
+                    is_openrouter=True,
+                )
+            elif target_model.startswith("gemma"):
                 g_effort = reasoning_effort if reasoning_effort is not None else "minimal"
                 res = await _invoke_gemma_model(target_model, system_msg, user_msg, active_key, max_tokens, reasoning_effort=g_effort, temperature=temperature)
             else:
                 res = await _invoke_gemini_model(target_model, system_msg, user_msg, active_key, max_tokens, reasoning_effort=reasoning_effort, temperature=temperature)
 
-            db.increment_user_requests(user_id)
+            if count_quota:
+                db.increment_user_requests(user_id)
 
-            footer = "" if target_model == models_to_try[0] else f"\n\n**> [Использована модель: {target_model}]**"
+            footer = "" if target_model == models_to_try[0] else f"\n\n_[Использована модель: {target_model}]_"
 
             if chat_id:
                 asyncio.create_task(tracer.queue_trace(chat_id, {
@@ -483,9 +519,15 @@ async def call_ai(
                     "error": str(e)
                 }))
 
-            if status_msg and i + 1 < len(status_msg_texts := cfg.STATUS_MESSAGES_FALLBACK):
+            err_low = str(e).lower()
+            if not is_openrouter_model and ("401" in err_low or "403" in err_low or "api key not valid" in err_low or "unauthorized" in err_low):
+                logger.warning(f"🔑 Фатальная ошибка авторизации для ключа ({e}). Пропуск остальных моделей Google...")
+                break
+
+            google_status_texts = cfg.STATUS_MESSAGES_FALLBACK[:-1]
+            if status_msg and i + 1 < len(google_status_texts):
                 try:
-                    next_status = status_msg_texts[min(i + 1, len(status_msg_texts) - 1)]
+                    next_status = google_status_texts[min(i + 1, len(google_status_texts) - 1)]
                     await status_msg.edit_text(next_status)
                 except Exception:
                     pass
@@ -494,7 +536,7 @@ async def call_ai(
     # 2. FALLBACK: СБЕР GIGACHAT BOT (Если все модели в срезе не ответили)
     try:
         giga_res = await _invoke_gigachat_model(system_msg, user_msg, status_msg)
-        footer = "\n\n**> [Модели Google временно недоступны, использован Сбер GigaChat (контекст сильно уменьшен)]**"
+        footer = "\n\n_[Модели Google временно недоступны, использован Сбер GigaChat (контекст сильно уменьшен)]_"
         
         if chat_id:
             asyncio.create_task(tracer.queue_trace(chat_id, {

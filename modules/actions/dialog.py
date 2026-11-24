@@ -49,8 +49,7 @@ async def handle_dialog(message: Any, text: str, username: Optional[str], user_i
         is_reply and 
         replied_msg and 
         replied_msg.from_user and 
-        replied_msg.from_user.is_self and 
-        re.search(cfg.PHANTOM_NAMES_PATTERN, text.lower())
+        replied_msg.from_user.is_self
     )
 
     # ---------------------------------------------------------------------
@@ -103,9 +102,10 @@ async def handle_dialog(message: Any, text: str, username: Optional[str], user_i
         replied_id = replied_msg.id
         msg_id = message.id
 
-        # Начинаем снизу (от текущего сообщения msg_id) и идем вверх до сообщения replied_id (максимум 40 сообщений)
+        # Берем само сообщение-источник и до 40 последних сообщений перед текущим запросом
         queries: List[Tuple[str, tuple]] = [
-            ("SELECT id, author, text FROM {table_name} WHERE id >= ? AND id <= ? ORDER BY id ASC LIMIT 40", (replied_id, msg_id))
+            ("SELECT id, author, text FROM {table_name} WHERE id = ?", (replied_id,)),
+            ("SELECT id, author, text FROM {table_name} WHERE id >= ? AND id <= ? ORDER BY id DESC LIMIT 40", (replied_id, msg_id))
         ]
         ctx_lines = db.get_unique_messages_context(chat_id, queries)
 
@@ -157,12 +157,12 @@ async def handle_dialog(message: Any, text: str, username: Optional[str], user_i
         if d_uid not in processed_uids:
             match_found = False
             uname = (d["username"] or "").lower().lstrip("@")
-            if uname and uname in combined_search_text:
+            if uname and re.search(rf"(?<![а-яёa-z0-9_]){re.escape(uname)}(?![а-яёa-z0-9_])", combined_search_text):
                 match_found = True
             elif d["aliases"]:
                 aliases_list = [a.strip().lower() for a in d["aliases"].split(";") if a.strip()]
                 for alias in aliases_list:
-                    if alias and len(alias) >= 2 and alias in combined_search_text:
+                    if alias and len(alias) >= 2 and re.search(rf"(?<![а-яёa-z0-9_]){re.escape(alias)}(?![а-яёa-z0-9_])", combined_search_text):
                         match_found = True
                         break
 
@@ -176,6 +176,10 @@ async def handle_dialog(message: Any, text: str, username: Optional[str], user_i
                     )
 
     # 3.4. ИИ-ИЗВЛЕКАТЕЛЬ ДОСЬЕ (Gemma-4) — Склонение имен и смысловой поиск (управляется админом)
+    status_msg = None
+    if not clean_mode:
+        status_msg = await message.reply_text(cfg.STATUS_MESSAGES_FALLBACK[0])
+
     if db.get_chat_gemma_dossier_mode(chat_id):
         matched_gemma_uids = await extract_mentioned_dossiers_via_gemma(
             chat_id, user_id, username, user_key, context_text, user_prompt
@@ -214,10 +218,6 @@ async def handle_dialog(message: Any, text: str, username: Optional[str], user_i
         f"3. СТРОГО ЗАПРЕЩЕНО ставить символ '@' перед юзернеймами людей (пиши просто имена/псевдонимы).\n"
         f"4. Прочитай переписку выше и ответь на вопрос/задание пользователя: '{user_prompt}'"
     )
-
-    status_msg = None
-    if not clean_mode:
-        status_msg = await message.reply_text(cfg.STATUS_MESSAGES_FALLBACK[0])
 
     response = await call_ai(
         user_id=user_id,

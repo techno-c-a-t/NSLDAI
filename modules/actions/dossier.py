@@ -88,7 +88,7 @@ def parse_dossier_input(raw_text: str) -> Optional[Tuple[str, str, str, str]]:
     return cmd, username, ";".join(uniq_aliases), dossier_text
 
 
-@router.on(EventType.COMMAND, pattern=r"(?i)^фантом,\s*(записывай|дополни|вычеркивай)", admin_only=True, priority=30)
+@router.on(EventType.COMMAND, pattern=r"(?i)^фантом,?\s*(записывай|дополни|вычеркивай)", admin_only=True, priority=30)
 async def handle_new_dossier_syntax_event(ctx: EventContext) -> bool:
     """
     @brief Обработчик трех синтаксисов управления досье по первому строковому заголовку.
@@ -228,7 +228,7 @@ async def handle_legacy_dossier_command(message: Any, text: str, is_me: bool) ->
             await utils.send_as_phantom(message, f"Очистил досье для {target_user.first_name}.")
         return
 
-@router.on(EventType.COMMAND, pattern=r"(?i)^фантом,?\s*(включи|подключи)\s+(ии\s*досье|гемм[уа]\s*досье)\b", admin_only=True, priority=29)
+@router.on(EventType.COMMAND, pattern=r"(?i)^фантом,?\s*(?:(включи|подключи)\s+(?:ии\s*досье|гемм[уа]\s*досье)|досье\s+гемм[ау]\s+вкл)\b", admin_only=True, priority=29)
 async def handle_gemma_dossier_on(ctx: EventContext) -> bool:
     db.set_chat_gemma_dossier_mode(ctx.chat_id, True)
     clean_mode = db.get_chat_clean_mode(ctx.chat_id)
@@ -238,7 +238,7 @@ async def handle_gemma_dossier_on(ctx: EventContext) -> bool:
         await utils.send_as_phantom(ctx.message, "ИИ-извлекатель досье (Gemma-4) подключен к работе 🟢")
     return True
 
-@router.on(EventType.COMMAND, pattern=r"(?i)^фантом,?\s*(выключи|отключи)\s+(ии\s*досье|гемм[уа]\s*досье)\b", admin_only=True, priority=29)
+@router.on(EventType.COMMAND, pattern=r"(?i)^фантом,?\s*(?:(выключи|отключи)\s+(?:ии\s*досье|гемм[уа]\s*досье)|досье\s+гемм[ау]\s+выкл)\b", admin_only=True, priority=29)
 async def handle_gemma_dossier_off(ctx: EventContext) -> bool:
     db.set_chat_gemma_dossier_mode(ctx.chat_id, False)
     clean_mode = db.get_chat_clean_mode(ctx.chat_id)

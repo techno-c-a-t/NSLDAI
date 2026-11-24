@@ -49,6 +49,11 @@ SESSION_PATH: str = os.getenv("SESSION_PATH", "phantom_userbot")
 # Дефолтный API ключ Google Gemini (проверяем DEFAULT_API_KEY и GEMINI_API_KEY)
 DEFAULT_API_KEY: str = os.getenv("DEFAULT_API_KEY") or os.getenv("GEMINI_API_KEY") or ""
 
+# OpenRouter API (для Baidu ERNIE-5.5-Flash-Preview и др.)
+OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip()
+AI_PROVIDER_MODE: str = os.getenv("AI_PROVIDER_MODE", "auto").strip().lower()  # auto | openrouter | google
+
 # Белый список чатов (если пуст — разрешены все)
 ALLOWED_CHATS: List[int] = []
 ALLOWED_CHAT_IDS: Set[int] = set()
@@ -91,10 +96,10 @@ except Exception:
 # ТОЧНЫЙ СПИСОК МОДЕЛЕЙ ИЗ GOOGLE AI STUDIO ПО ИЕРАРХИИ ПОЛЬЗОВАТЕЛЯ
 # =====================================================================
 AI_MODELS_CHAIN: List[str] = [
-    "gemini-3.5-flash-lite",    # 1. Приоритет №1: Gemini 3.5 Flash Lite
-    "gemini-3.1-flash-lite",    # 2. Приоритет №2: Gemini 3.1 Flash Lite
-    "gemma-4-31b-it",           # 3. Приоритет №3: Gemma 4 31B IT
-    "gemma-4-26b-a4b-it",       # 4. Приоритет №4: Gemma 4 26B A4B IT
+    "baidu/ernie-5.5-flash-preview",  # 1. Приоритет №1: Baidu ERNIE 5.5 Flash (OpenRouter)
+    "gemini-3.1-flash-lite",          # 2. Приоритет №2: Gemini 3.1 Flash Lite
+    "gemma-4-31b-it",                 # 3. Приоритет №3: Gemma 4 31B IT
+    "gemma-4-26b-a4b-it",             # 4. Приоритет №4: Gemma 4 26B A4B IT
 ]
 
 MODEL_PREMIUM: str = AI_MODELS_CHAIN[0]
@@ -112,11 +117,11 @@ STATUS_MESSAGES_FALLBACK: List[str] = [
 # Улучшенное регулярное выражение обращения к Фантому (учитывает кириллические границы слов, запятые, кавычки, абзацы)
 PHANTOM_NAMES_PATTERN: str = r"(?i)(?<![а-яёa-z0-9_])(фантом(?:чик|ушка|ас)?|phantom|fantom)(?![а-яёa-z0-9_])"
 
-SUMMARY_PATTERN: str = r"(?i)фантом,\s*(что происходит|че творится|введи в курс дела|кратко че тут|че обсуждаете)(?:\s+(\d+))?"
-SUMMARY_LIMIT_SET_PATTERN: str = r"(?i)^фантом,?\s*(?:установи\s+длину\s+сводки|длина\s+сводки)\s+(\d+)$"
+SUMMARY_PATTERN: str = r"(?i)(?:^!сводка|фантом,?\s*(?:сводка|что происходит|че творится|введи в курс дела|кратко че тут|че тут|че обсуждаете))(?:\s+(\d+))?"
+SUMMARY_LIMIT_SET_PATTERN: str = r"(?i)^фантом,?\s*(?:установи\s+(?:длину|лимит)\s+сводки|(?:длина|лимит)\s+сводки)\s+(\d+)$"
 HELP_PATTERN: str = r"(?i)^(фантом|phantom|@tech_phantom),?\s+(гайд|помощь|help|команды)\b"
 YO_PATTERN: str = r"(?i)[йy][оoаa]+,?\s*(фантом|phantom)[^а-яёa-z0-9\s]{0,5}$"
-DUMP_PATTERN: str = r"(?i)^дамп\s+(\d+)$"
+DUMP_PATTERN: str = r"(?i)^(?:фантом,?\s*)?дамп(?:\s+(\d+))?$"
 
 WIPE_PATTERN: str = r"(?i)^(?:фантом,?\s*вайп\b|ВАЙП$)"
 
@@ -180,12 +185,20 @@ ADMIN_HELP_MESSAGE: str = """🛠️ **АДМИН-ПАНЕЛЬ ФАНТОМА**
 • `Фантом, лимит запросов [число]` — размер суточного лимита (дефолт 5).
 
 🗄️ **История и БД:**
+• `Фантом, подтяни историю [N]` — ручная дозагрузка истории из Telegram.
 • `Фантом, длина сводки [N]` — размер сводки по умолчанию (20..2000).
 • `Фантом, приберись` — удалить до 10 последних сервисных сообщений.
 • `Фантом, вайп` — полная очистка сообщений бота в чате и БД.
 • `дамп [N]` / `дамп > 20` — выгрузка сообщений из БД (в чат / в файл).
+• `Фантом, рестарт` / `перезагрузись` (только в ЛС) — перезапуск контейнера бота.
 
 📡 **Трассировка и Досье:**
 • `Фантом, трассировка вкл / выкл` — трансляция JSON-логов в ЛС.
 • `Фантом, записывай / дополни / вычеркивай` — карточки жителей.
-• `Фантом, включи / выключи гемму досье` — ИИ-извлечение фактов."""
+• `Фантом, включи / выключи гемму досье` — ИИ-извлечение фактов.
+
+📝 **Общие команды (для всех):**
+• `!сводка [N]` / `Фантом, сводка [N]` — выжимка последних N сообщений (20..2000).
+• `Фантом, [вопрос]` / реплай на Фантома / `@tech_phantom` — диалог с ИИ.
+• ГС / видео-кружочки — авто-расшифровка + выжимка (в режиме «по запросу» — реплай).
+• `Я проиграл`, `Фантом, лоб`, `Йо, Фантом` — пасхалки."""

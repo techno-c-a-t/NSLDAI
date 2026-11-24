@@ -28,6 +28,9 @@ sber_voice_queue: asyncio.Queue = asyncio.Queue()
 ## @brief Отдельная асинхронная очередь длинных ГС (> 3 минут)
 sber_voice_queue_long: asyncio.Queue = asyncio.Queue()
 
+## @brief Фоновая очередь с низшим приоритетом (ГС во время синхронизации, без вывода в чат)
+sber_voice_queue_bg: asyncio.Queue = asyncio.Queue()
+
 ## @brief Событие уведомления о поступлении новой задачи в любую из очередей
 voice_queue_notify: asyncio.Event = asyncio.Event()
 
@@ -35,17 +38,23 @@ class VoiceContext:
     """
     @brief Контекст состояния обработки конкретного голосового сообщения.
     """
-    def __init__(self, original_message: Any, status_msg: Optional[Any] = None, target_message: Optional[Any] = None):
+    def __init__(self, original_message: Any, status_msg: Optional[Any] = None, target_message: Optional[Any] = None, silent: bool = False):
         """
         @param original_message Исходное сообщение пользователя с ГС.
         @param status_msg Опциональное служебное сообщение статуса ("Закинул на расшифровку").
         @param target_message Целевое сообщение для установки реакций Telegram (ГС или запрос).
+        @param silent Если True — фоновая расшифровка только в БД без вывода в чат.
         """
         self.original_message = original_message
         self.status_msg: Optional[Any] = status_msg
         self.target_message: Any = target_message or status_msg or original_message
+        self.silent: bool = silent
         self.sber_ack_id: Optional[int] = None
         self.done_event: asyncio.Event = asyncio.Event()
+        self.ticker_stop_event: asyncio.Event = asyncio.Event()
+        self.ticker_task: Optional[asyncio.Task] = None
+        self.edit_lock: asyncio.Lock = asyncio.Lock()
+        self.retry_requested: bool = False
         self.collected_messages: Dict[int, str] = {}
         self.debounce_task: Optional[asyncio.Task] = None
         self.start_time: float = time.time()
@@ -116,20 +125,22 @@ async def _live_countdown_ticker(
     get_text_func: Any, 
     initial_seconds: int, 
     stop_event: asyncio.Event,
-    is_queue: bool = False
+    is_queue: bool = False,
+    edit_lock: Optional[asyncio.Lock] = None,
 ) -> None:
     """
-    @brief Интерактивный обратный отсчет:
-           - Для топа очереди (позиция 1) и активной расшифровки: раз в 1 секунду.
-           - Для остальных позиций в очереди (позиция >= 2): раз в 5 секунд.
+    @brief Интерактивный обратный отсчет с защитой от FLOOD_WAIT и гонок редактирования:
+           - Активная расшифровка: раз в 3 секунды.
+           - Топ очереди (позиция <= 1): раз в 5 секунд.
+           - Остальные позиции в очереди (позиция >= 2): раз в 10 секунд.
     """
     rem = initial_seconds
     while not stop_event.is_set() and rem > 0:
         if is_queue:
             cur_pos = get_queue_position(stop_event)
-            step = 1 if cur_pos <= 1 else 5
+            step = 5 if cur_pos <= 1 else 10
         else:
-            step = 1
+            step = 3
 
         actual_step = min(step, rem)
 
@@ -141,12 +152,23 @@ async def _live_countdown_ticker(
                 break
             rem -= actual_step
             try:
-                new_text = get_text_func(rem)
-                if getattr(status_msg, "text", "") != new_text:
-                    await status_msg.edit_text(new_text)
+                if edit_lock:
+                    async with edit_lock:
+                        if stop_event.is_set():
+                            break
+                        new_text = get_text_func(rem)
+                        if getattr(status_msg, "text", "") != new_text:
+                            await status_msg.edit_text(new_text)
+                else:
+                    if stop_event.is_set():
+                        break
+                    new_text = get_text_func(rem)
+                    if getattr(status_msg, "text", "") != new_text:
+                        await status_msg.edit_text(new_text)
             except Exception as e:
                 if "FLOOD_WAIT" in str(e).upper():
-                    await asyncio.sleep(2.0)
+                    logger.warning("⚠️ [VOICE TICKER] FLOOD_WAIT, останавливаем тикер для сохранения квоты.")
+                    break
 
 def is_music_track(message: Any) -> bool:
     """
@@ -174,6 +196,18 @@ def is_no_speech(text: str) -> bool:
     """
     t = text.lower()
     return "не удалось ничего распознать" in t or "без речи" in t or "аудио без речи" in t
+
+def is_sber_busy_retry(text: str) -> bool:
+    """
+    @brief Проверяет, вернул ли Сбер сообщение о перегрузке в час пик с просьбой повторить отправку.
+    """
+    t = text.lower()
+    return (
+        "повышенную активность" in t
+        or "пропускать некоторые сообщения" in t
+        or "попробуйте ещё раз" in t
+        or "попробуйте еще раз" in t
+    )
 
 async def summarize_voice_transcription(
     chat_id: int,
@@ -212,7 +246,8 @@ async def summarize_voice_transcription(
             model="gemma-4-31b-it",
             chat_id=chat_id,
             reasoning_effort="minimal",
-            temperature=0.7
+            temperature=0.7,
+            count_quota=False,
         )
         cleaned = ai_service.clean_ai_response(res)
         cleaned = re.sub(r"(?s)\n\n\*\*>\s*\[.*?\]\*\*", "", cleaned).strip()
@@ -255,12 +290,18 @@ async def get_next_voice_item() -> Tuple[Any, asyncio.Queue]:
         if not sber_voice_queue_long.empty():
             return sber_voice_queue_long.get_nowait(), sber_voice_queue_long
 
-        # Если обе очереди пусты — сбрасываем флаг и ожидаем уведомления
+        # Приоритет №3: фоновая очередь (низший приоритет)
+        if not sber_voice_queue_bg.empty():
+            return sber_voice_queue_bg.get_nowait(), sber_voice_queue_bg
+
+        # Если все очереди пусты — сбрасываем флаг и ожидаем уведомления
         voice_queue_notify.clear()
         if not sber_voice_queue.empty():
             return sber_voice_queue.get_nowait(), sber_voice_queue
         if not sber_voice_queue_long.empty():
             return sber_voice_queue_long.get_nowait(), sber_voice_queue_long
+        if not sber_voice_queue_bg.empty():
+            return sber_voice_queue_bg.get_nowait(), sber_voice_queue_bg
 
         try:
             await asyncio.wait_for(voice_queue_notify.wait(), timeout=1.0)
@@ -272,10 +313,11 @@ async def queue_voice_message(
     message: Any, 
     force: bool = False, 
     status_msg: Optional[Any] = None,
-    request_msg: Optional[Any] = None
+    request_msg: Optional[Any] = None,
+    silent: bool = False,
 ) -> None:
     """
-    @brief Помещает сообщение с ГС/аудио в соответствующую очередь (основная <=3 мин или длинная >3 мин).
+    @brief Помещает сообщение с ГС/аудио в соответствующую очередь (основная <=3 мин, длинная >3 мин или фоновая).
     """
     chat_id = message.chat.id
     clean_mode = db.get_chat_clean_mode(chat_id)
@@ -300,6 +342,13 @@ async def queue_voice_message(
     duration = get_audio_duration(message)
     is_long = duration > 180
     started_event = asyncio.Event()
+
+    if silent:
+        item = (message, None, message, started_event, True)
+        logger.info(f"🔇 [VOICE QUEUE BG] ГС id={message.id} ({duration} сек) помещено в фоновую очередь низшего приоритета.")
+        sber_voice_queue_bg.put_nowait(item)
+        voice_queue_notify.set()
+        return
 
     # Если НЕ чистый режим и служебного сообщения еще нет — сразу отправляем статус (забиваем место под ГС)
     if not clean_mode and not status_msg:
@@ -338,10 +387,10 @@ async def queue_voice_message(
 @router.on(EventType.TEXT_MESSAGE, priority=10)
 async def handle_auto_voice_message(ctx: EventContext) -> bool:
     """
-    @brief Перехватчик всех входящих голосовых и аудио сообщений в разрешенных чатах.
+    @brief Перехватчик всех входящих голосовых, аудио и видео-кружочков в разрешенных чатах.
     """
     message = ctx.message
-    if message and (message.voice or message.audio):
+    if message and (message.voice or message.audio or message.video_note):
         asyncio.create_task(queue_voice_message(None, message, force=False))
         return True
     return False
@@ -357,7 +406,10 @@ async def sber_worker_loop(client: Any) -> None:
         try:
             item, source_queue = await get_next_voice_item()
             started_event = None
-            if isinstance(item, tuple) and len(item) == 4:
+            silent = False
+            if isinstance(item, tuple) and len(item) == 5:
+                original_msg, status_msg, target_msg, started_event, silent = item
+            elif isinstance(item, tuple) and len(item) == 4:
                 original_msg, status_msg, target_msg, started_event = item
             elif isinstance(item, tuple) and len(item) == 3:
                 original_msg, status_msg, target_msg = item
@@ -370,7 +422,7 @@ async def sber_worker_loop(client: Any) -> None:
             if started_event:
                 started_event.set()
 
-            active_context = VoiceContext(original_msg, status_msg, target_msg)
+            active_context = VoiceContext(original_msg, status_msg, target_msg, silent=silent)
             chat_id = original_msg.chat.id
             clean_mode = db.get_chat_clean_mode(chat_id)
             duration = get_audio_duration(original_msg)
@@ -380,8 +432,8 @@ async def sber_worker_loop(client: Any) -> None:
             active_context.start_time = time.time()
             active_context.estimated_time = self_est
             
-            # Интерактивный посекундный отсчет этапа «Расшифровываю (~Xс)...»
-            if status_msg and not clean_mode:
+            # Интерактивный отсчет этапа «Расшифровываю (~Xс)...» (не запускаем в silent/clean режиме)
+            if status_msg and not clean_mode and not silent:
                 def get_transcribe_text(rem_sec: int) -> str:
                     prefix = "Расшифровываю (длинное ГС >3 мин" if is_long else "Расшифровываю"
                     if rem_sec > 0:
@@ -395,37 +447,81 @@ async def sber_worker_loop(client: Any) -> None:
                 except Exception:
                     pass
 
-                asyncio.create_task(_live_countdown_ticker(status_msg, get_transcribe_text, self_est, active_context.done_event, is_queue=False))
+                active_context.ticker_task = asyncio.create_task(
+                    _live_countdown_ticker(
+                        status_msg,
+                        get_transcribe_text,
+                        self_est,
+                        active_context.ticker_stop_event,
+                        is_queue=False,
+                        edit_lock=active_context.edit_lock,
+                    )
+                )
 
             try:
-                await original_msg.forward(cfg.SBER_SPEECH_BOT)
-                duration = get_audio_duration(original_msg)
+                max_attempts = 3
                 timeout_sec = max(180, duration + 60)
-                await asyncio.wait_for(active_context.done_event.wait(), timeout=timeout_sec)
+                for attempt in range(1, max_attempts + 1):
+                    active_context.retry_requested = False
+                    active_context.done_event.clear()
+                    await original_msg.forward(cfg.SBER_SPEECH_BOT)
+                    await asyncio.wait_for(active_context.done_event.wait(), timeout=timeout_sec)
+
+                    if not active_context.retry_requested:
+                        break
+
+                    logger.warning(f"⏳ [SBER BUSY] Повторная отправка ГС {original_msg.id} (попытка {attempt}/{max_attempts})...")
+                    if attempt == max_attempts:
+                        active_context.ticker_stop_event.set()
+                        if not silent:
+                            if clean_mode or not active_context.status_msg:
+                                await utils.set_reaction(active_context.target_message, "😭")
+                            elif active_context.status_msg:
+                                async with active_context.edit_lock:
+                                    try:
+                                        await active_context.status_msg.edit_text("😭 Сбер перегружен в час пик, попробуй позже.")
+                                    except Exception:
+                                        pass
+                        break
+
+                    if not silent and not clean_mode and active_context.status_msg:
+                        async with active_context.edit_lock:
+                            try:
+                                await active_context.status_msg.edit_text(f"⏳ Сбер перегружен, пробую ещё раз ({attempt}/{max_attempts})...")
+                            except Exception:
+                                pass
+                    await asyncio.sleep(3.0 * attempt)
             except asyncio.TimeoutError:
                 logger.warning(f"Таймаут обработки ГС для сообщения {original_msg.id} (таймаут {timeout_sec}с)")
                 if active_context:
+                    active_context.ticker_stop_event.set()
                     if active_context.debounce_task and not active_context.debounce_task.done():
                         active_context.debounce_task.cancel()
-                    chat_id = original_msg.chat.id
-                    clean_mode = db.get_chat_clean_mode(chat_id)
-                    if clean_mode or not active_context.status_msg:
-                        await utils.set_reaction(active_context.target_message, "😭")
-                    if active_context.status_msg:
-                        try:
-                            await active_context.status_msg.edit_text("Не удалось расшифровать ГС (таймаут ответа).")
-                        except Exception:
-                            pass
+                    if not silent:
+                        if clean_mode or not active_context.status_msg:
+                            await utils.set_reaction(active_context.target_message, "😭")
+                        if active_context.status_msg:
+                            async with active_context.edit_lock:
+                                try:
+                                    await active_context.status_msg.edit_text("Не удалось расшифровать ГС (таймаут ответа).")
+                                except Exception:
+                                    pass
             except Exception as e:
                 logger.exception(f"Ошибка воркера ГС: {e}")
-                if active_context and active_context.status_msg:
-                    try:
-                        await active_context.status_msg.edit_text("Не удалось отправить ГС на распознавание.")
-                    except Exception:
-                        pass
+                if active_context and active_context.status_msg and not silent:
+                    active_context.ticker_stop_event.set()
+                    async with active_context.edit_lock:
+                        try:
+                            await active_context.status_msg.edit_text("Не удалось отправить ГС на распознавание.")
+                        except Exception:
+                            pass
             finally:
-                if active_context and active_context.debounce_task and not active_context.debounce_task.done():
-                    active_context.debounce_task.cancel()
+                if active_context:
+                    active_context.ticker_stop_event.set()
+                    if active_context.ticker_task and not active_context.ticker_task.done():
+                        active_context.ticker_task.cancel()
+                    if active_context.debounce_task and not active_context.debounce_task.done():
+                        active_context.debounce_task.cancel()
                 active_context = None
                 source_queue.task_done()
                 await asyncio.sleep(0.05)
@@ -512,17 +608,19 @@ async def _async_summarize_and_update(
         except Exception as e:
             logger.exception(f"⚠️ Не удалось отредактировать сообщение ГС после сжатия ({e}). Отправка отдельным...")
             await utils.send_as_phantom(target_msg, final_output, category="VOICE_TRANSCRIPTION", parse_mode=enums.ParseMode.HTML)
-    elif not clean_mode:
+    else:
+        if clean_mode:
+            await utils.set_reaction(target_msg, None)
         logger.info(f"📤 [SEND PHANTOM] Отправка новым сообщением в чат {chat_id}...")
         await utils.send_as_phantom(target_msg, final_output, category="VOICE_TRANSCRIPTION", parse_mode=enums.ParseMode.HTML)
 
 async def _finalize_sber_transcription(context: VoiceContext) -> None:
     """
-    @brief Финализирует накопленные сообщения от Сбер Спич Бота после ультра-быстрой паузы (дебаунс 0.35с).
+    @brief Финализирует накопленные сообщения от Сбер Спич Бота после паузы (дебаунс 1.0с).
     @details Сразу же отображает распознанный текст в Telegram и мгновенно освобождает воркер для следующего ГС!
     """
     try:
-        await asyncio.sleep(0.35)
+        await asyncio.sleep(1.0)
     except asyncio.CancelledError:
         return
 
@@ -542,19 +640,31 @@ async def _finalize_sber_transcription(context: VoiceContext) -> None:
     clean_mode = db.get_chat_clean_mode(chat_id)
     target_msg = context.target_message
 
-    await utils.set_reaction(target_msg, None)
+    # Останавливаем тикер отсчета строго ДО финального редактирования status_msg
+    context.ticker_stop_event.set()
+    if context.ticker_task and not context.ticker_task.done():
+        context.ticker_task.cancel()
+
+    # Сохраняем расшифровку под исходным сообщением автора в БД
+    db.update_message_text(chat_id, orig.id, f"[Голосовое сообщение]: {full_text}")
+
+    if context.silent:
+        context.done_event.set()
+        return
 
     words = full_text.split()
 
     if len(words) <= 30:
+        await utils.set_reaction(target_msg, None)
         # 1. КОРОТКОЕ ГС (<=30 слов): сжатие не требуется, мгновенно выводим сырой текст и завершаем
         if context.status_msg and not clean_mode:
-            try:
-                await context.status_msg.edit_text(full_text)
-                db.update_message_text(chat_id, context.status_msg.id, full_text)
-            except Exception as e:
-                logger.warning(f"⚠️ Не удалось отредактировать статус короткого ГС ({e}): {full_text[:50]}")
-                await utils.send_as_phantom(target_msg, full_text, category="VOICE_TRANSCRIPTION")
+            async with context.edit_lock:
+                try:
+                    await context.status_msg.edit_text(full_text)
+                    db.update_message_text(chat_id, context.status_msg.id, full_text)
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось отредактировать статус короткого ГС ({e}): {full_text[:50]}")
+                    await utils.send_as_phantom(target_msg, full_text, category="VOICE_TRANSCRIPTION")
         else:
             await utils.send_as_phantom(target_msg, full_text, category="VOICE_TRANSCRIPTION")
 
@@ -569,17 +679,20 @@ async def _finalize_sber_transcription(context: VoiceContext) -> None:
         # Мгновенно освобождаем очередь воркера Сбера
         context.done_event.set()
     else:
-        # 2. ДЛИННОЕ ГС (>30 слов): МГНОВЕННО заменяем «Расшифровываю...» на распознанный текст Сбера!
-        interim_text = full_text if len(full_text) <= 3800 else full_text[:3800].rsplit(" ", 1)[0] + "..."
-        if context.status_msg and not clean_mode:
-            try:
-                await context.status_msg.edit_text(f"{interim_text}\n\n⏳ Сокращаю...")
-                db.update_message_text(chat_id, context.status_msg.id, full_text)
-            except Exception as e:
-                logger.warning(f"⚠️ Не удалось вывести промежуточный текст ГС ({e}): {full_text[:50]}")
-        elif not clean_mode:
-            sent_status = await utils.send_as_phantom(target_msg, f"{interim_text}\n\n⏳ Сокращаю...", category="VOICE_TRANSCRIPTION")
-            context.status_msg = sent_status
+        # 2. ДЛИННОЕ ГС (>30 слов): МГНОВЕННО заменяем «Расшифровываю...» на распознанный текст Сбера (в обычном режиме)
+        if not clean_mode:
+            await utils.set_reaction(target_msg, None)
+            interim_text = full_text if len(full_text) <= 3800 else full_text[:3800].rsplit(" ", 1)[0] + "..."
+            if context.status_msg:
+                async with context.edit_lock:
+                    try:
+                        await context.status_msg.edit_text(f"{interim_text}\n\n⏳ Сокращаю...")
+                        db.update_message_text(chat_id, context.status_msg.id, full_text)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Не удалось вывести промежуточный текст ГС ({e}): {full_text[:50]}")
+            else:
+                sent_status = await utils.send_as_phantom(target_msg, f"{interim_text}\n\n⏳ Сокращаю...", category="VOICE_TRANSCRIPTION")
+                context.status_msg = sent_status
 
         # МГНОВЕННО освобождаем воркер Сбера! Пошел таймер и обработка следующего ГС в очереди!
         context.done_event.set()
@@ -636,17 +749,35 @@ async def handle_sber_message(client: Any, message: Any) -> None:
         active_context.done_event.set()
         return
 
-    error_type = is_sber_error(text)
-    if error_type:
+    if is_sber_busy_retry(text):
         if active_context.debounce_task and not active_context.debounce_task.done():
             active_context.debounce_task.cancel()
-        chat_id = active_context.original_message.chat.id
-        clean_mode = db.get_chat_clean_mode(chat_id)
-        if clean_mode or not active_context.status_msg:
-            await utils.set_reaction(active_context.target_message, "😭")
-        if active_context.status_msg:
-            try: await active_context.status_msg.delete()
-            except Exception: pass
+        active_context.retry_requested = True
+        active_context.done_event.set()
+        return
+
+    error_type = is_sber_error(text)
+    if error_type:
+        active_context.ticker_stop_event.set()
+        if active_context.debounce_task and not active_context.debounce_task.done():
+            active_context.debounce_task.cancel()
+        if not active_context.silent:
+            chat_id = active_context.original_message.chat.id
+            clean_mode = db.get_chat_clean_mode(chat_id)
+            if clean_mode or not active_context.status_msg:
+                await utils.set_reaction(active_context.target_message, "😭")
+                if active_context.status_msg:
+                    try: await active_context.status_msg.delete()
+                    except Exception: pass
+            else:
+                err_txt = (
+                    "😭 Сбер не принял аудио: файл слишком большой (>8 МБ)."
+                    if error_type == "limit"
+                    else "😭 Сбер не поддерживает этот формат аудио."
+                )
+                async with active_context.edit_lock:
+                    try: await active_context.status_msg.edit_text(err_txt)
+                    except Exception: pass
         active_context.done_event.set()
         return
 
@@ -673,15 +804,35 @@ async def handle_sber_edit(client: Any, message: Any) -> None:
         active_context.done_event.set()
         return
 
-    error_type = is_sber_error(text)
-    if error_type:
+    if is_sber_busy_retry(text):
         if active_context.debounce_task and not active_context.debounce_task.done():
             active_context.debounce_task.cancel()
-        target_msg = active_context.target_message
-        await utils.set_reaction(target_msg, "😭")
-        if active_context.status_msg:
-            try: await active_context.status_msg.delete()
-            except Exception: pass
+        active_context.retry_requested = True
+        active_context.done_event.set()
+        return
+
+    error_type = is_sber_error(text)
+    if error_type:
+        active_context.ticker_stop_event.set()
+        if active_context.debounce_task and not active_context.debounce_task.done():
+            active_context.debounce_task.cancel()
+        if not active_context.silent:
+            chat_id = active_context.original_message.chat.id
+            clean_mode = db.get_chat_clean_mode(chat_id)
+            if clean_mode or not active_context.status_msg:
+                await utils.set_reaction(active_context.target_message, "😭")
+                if active_context.status_msg:
+                    try: await active_context.status_msg.delete()
+                    except Exception: pass
+            else:
+                err_txt = (
+                    "😭 Сбер не принял аудио: файл слишком большой (>8 МБ)."
+                    if error_type == "limit"
+                    else "😭 Сбер не поддерживает этот формат аудио."
+                )
+                async with active_context.edit_lock:
+                    try: await active_context.status_msg.edit_text(err_txt)
+                    except Exception: pass
         active_context.done_event.set()
         return
 

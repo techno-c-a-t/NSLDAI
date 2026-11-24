@@ -75,13 +75,50 @@ def format_author(msg: Any) -> str:
     return f"{fname}{uname}"
 
 
+def format_media_text(msg: Any) -> str:
+    """
+    @brief Форматирует текст сообщения с учетом медиа-вложений и подписей (caption).
+    """
+    if not msg:
+        return ""
+    if getattr(msg, "text", None):
+        return msg.text
+
+    tag = ""
+    if getattr(msg, "photo", None):
+        tag = "[Фото]"
+    elif getattr(msg, "video", None):
+        tag = "[Видео]"
+    elif getattr(msg, "animation", None):
+        tag = "[GIF]"
+    elif getattr(msg, "document", None):
+        tag = "[Файл]"
+    elif getattr(msg, "sticker", None):
+        emoji = getattr(msg.sticker, "emoji", "") or ""
+        tag = f"[Стикер {emoji}]".strip() if emoji else "[Стикер]"
+    elif getattr(msg, "voice", None):
+        tag = "[Голосовое сообщение]"
+    elif getattr(msg, "video_note", None):
+        tag = "[Видео-кружочек]"
+    elif getattr(msg, "audio", None):
+        tag = "[Аудио]"
+
+    caption = (getattr(msg, "caption", None) or "").strip()
+    if tag and caption:
+        return f"{tag} {caption}"
+    if tag:
+        return tag
+    return caption
+
+
 async def format_msg(msg: Any) -> Optional[Tuple[int, str, str, Any]]:
     """
     @brief Форматирует входящее сообщение Telegram в кортеж данных для сохранения в БД.
     @param msg Объект сообщения Pyrogram Message.
     @return Кортеж (id_сообщения, автор_с_контекстом_реплая, текст_сообщения, дата) или None.
     """
-    if not msg or not msg.text: 
+    text = format_media_text(msg)
+    if not msg or not text:
         return None
         
     author = format_author(msg)
@@ -89,10 +126,11 @@ async def format_msg(msg: Any) -> Optional[Tuple[int, str, str, Any]]:
     if msg.reply_to_message:
         r = msg.reply_to_message
         r_author = format_author(r)
-        snippet = " ".join((r.text or "").split()[:3]) + "..."
+        r_text = format_media_text(r)
+        snippet = " ".join(r_text.split()[:3]) + "..."
         author = f"{author} ответ {r_author} на \"{snippet}\""
         
-    return (msg.id, author, msg.text, msg.date)
+    return (msg.id, author, text, msg.date)
 
 
 async def set_reaction(message: Any, emoji: Optional[str] = None) -> bool:

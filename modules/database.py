@@ -7,6 +7,7 @@
 """
 
 import re
+import os
 import sqlite3
 import datetime
 import time
@@ -65,6 +66,9 @@ def init_db() -> None:
     @brief Инициализирует мастер-таблицы базы данных и выполняет миграции.
     @details Создает таблицы chats_master, daily_limits, user_dossiers при их отсутствии.
     """
+    db_dir = os.path.dirname(DB_NAME)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
     try:
         with get_connection() as conn:
             conn.execute('''CREATE TABLE IF NOT EXISTS chats_master 
@@ -93,10 +97,24 @@ def init_db() -> None:
             conn.execute('''CREATE TABLE IF NOT EXISTS user_dossiers 
                             (chat_id INTEGER, user_id INTEGER, username TEXT, aliases TEXT, dossier_text TEXT, updated_at INTEGER, PRIMARY KEY (chat_id, user_id))''')
 
+            conn.execute('''CREATE TABLE IF NOT EXISTS bot_settings 
+                            (key TEXT PRIMARY KEY, value TEXT)''')
+
             cursor = conn.execute("PRAGMA table_info(user_dossiers)")
             dossier_cols = [column[1] for column in cursor.fetchall()]
             if 'aliases' not in dossier_cols:
                 conn.execute("ALTER TABLE user_dossiers ADD COLUMN aliases TEXT DEFAULT ''")
+
+            # Загружаем персистентные настройки бота
+            pm_row = conn.execute("SELECT value FROM bot_settings WHERE key = 'ENABLE_PM_DIALOGS'").fetchone()
+            if pm_row is not None:
+                cfg.ENABLE_PM_DIALOGS = str(pm_row[0]).lower() in ("1", "true", "yes")
+            prov_row = conn.execute("SELECT value FROM bot_settings WHERE key = 'AI_PROVIDER_MODE'").fetchone()
+            if prov_row is not None and prov_row[0]:
+                cfg.AI_PROVIDER_MODE = str(prov_row[0]).strip().lower()
+            or_key_row = conn.execute("SELECT value FROM bot_settings WHERE key = 'OPENROUTER_API_KEY'").fetchone()
+            if or_key_row is not None and or_key_row[0]:
+                cfg.OPENROUTER_API_KEY = str(or_key_row[0]).strip()
 
             # Загружаем все ранее разрешенные чаты из БД в память
             active_rows = conn.execute("SELECT chat_id FROM chats_master WHERE is_active = 1").fetchall()
@@ -840,3 +858,43 @@ def get_user_daily_requests(user_id: int) -> int:
             return int(res[0]) if res and res[0] is not None else 0
     except sqlite3.OperationalError:
         return 0
+
+
+def get_bot_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    """
+    @brief Считывает глобальную настройку бота из таблицы bot_settings.
+    """
+    try:
+        with get_connection() as conn:
+            row = conn.execute("SELECT value FROM bot_settings WHERE key = ?", (key,)).fetchone()
+            return row[0] if row is not None else default
+    except sqlite3.OperationalError:
+        return default
+
+
+def set_bot_setting(key: str, value: str) -> None:
+    """
+    @brief Сохраняет глобальную настройку бота в таблицу bot_settings.
+    """
+    try:
+        with get_connection() as conn:
+            conn.execute(
+                "INSERT INTO bot_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, str(value)),
+            )
+    except sqlite3.OperationalError as e:
+        logger.warning(f"Ошибка сохранения настройки {key}: {e}")
+
+
+def get_all_chats() -> List[Dict[str, Any]]:
+    """
+    @brief Возвращает список всех зарегистрированных чатов из chats_master.
+    """
+    try:
+        with get_connection() as conn:
+            rows = conn.execute(
+                "SELECT chat_id, chat_name, is_active FROM chats_master ORDER BY is_active DESC, chat_id"
+            ).fetchall()
+            return [{"chat_id": r[0], "chat_name": r[1] or f"Chat_{r[0]}", "is_active": bool(r[2])} for r in rows]
+    except sqlite3.OperationalError:
+        return []

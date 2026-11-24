@@ -32,7 +32,7 @@ async def handle_summary_event(ctx: EventContext) -> None:
     """
     @brief Обработчик команды вызова саммари ("Фантом, что происходит [число]").
     """
-    explicit_count = ctx.match.group(2) if (ctx.match and ctx.match.group(2)) else None
+    explicit_count = ctx.match.group(1) if (ctx.match and ctx.match.group(1)) else None
     chat_id = ctx.chat_id
     clean_mode = db.get_chat_clean_mode(chat_id)
 
@@ -66,9 +66,9 @@ async def handle_summary_event(ctx: EventContext) -> None:
     
     if clean_mode:
         await utils.set_reaction(ctx.message, None)
-        await utils.send_as_phantom(ctx.message, f"**Нарыл (по {count} сообщениям):**\n\n{final_res}", category="AI_SUMMARY")
+        await utils.send_as_phantom(ctx.message, f"**Нарыл (по {len(history)} сообщениям):**\n\n{final_res}", category="AI_SUMMARY")
     else:
-        await utils.send_as_phantom(ctx.message, f"**Нарыл (по {count} сообщениям):**\n\n{final_res}", edit_message=status_msg, category="AI_SUMMARY")
+        await utils.send_as_phantom(ctx.message, f"**Нарыл (по {len(history)} сообщениям):**\n\n{final_res}", edit_message=status_msg, category="AI_SUMMARY")
 
 async def get_chat_summary(
     messages_list: List[str], 

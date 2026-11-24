@@ -1,0 +1,15 @@
+.git
+.sentry-native
+venv
+.venv
+__pycache__
+*.pyc
+data
+transfered
+*.session*
+*.db*
+.env
+dump.txt
+tests
+web
+index.html
