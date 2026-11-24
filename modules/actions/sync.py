@@ -69,6 +69,7 @@ async def run_sync(
     limit: Optional[int] = None,
     silent_status: bool = False,
     reaction_msg: Optional[Any] = None,
+    ignore_checkpoint: bool = False,
 ) -> None:
     """
     @brief Запускает синхронизацию пропущенной истории чата из Telegram API в строгой очереди.
@@ -89,7 +90,7 @@ async def run_sync(
 
     async with sync_lock:
         ctx.state = STATE_SYNCING
-        max_id = ctx.checkpoint_max_id if ctx.checkpoint_max_id > 0 else db.get_max_id_in_db(target_chat_id)
+        max_id = 0 if ignore_checkpoint else (ctx.checkpoint_max_id if ctx.checkpoint_max_id > 0 else db.get_max_id_in_db(target_chat_id))
         fetched: List[Any] = []
         found_gap = False
         sync_error: Optional[Exception] = None
@@ -108,7 +109,7 @@ async def run_sync(
                 if len(fetched) % 25 == 0:
                     await asyncio.sleep(0.5)
 
-            if not found_gap and max_id > 0:
+            if not ignore_checkpoint and not found_gap and max_id > 0:
                 db.clear_history_before(target_chat_id, max_id)
 
             for m in reversed(fetched):
@@ -137,6 +138,8 @@ async def run_sync(
             if trigger_msg:
                 if sync_error:
                     await utils.send_as_phantom(trigger_msg, f"⚠️ Ошибка синхронизации истории: {sync_error}")
+                elif ignore_checkpoint:
+                    await utils.send_as_phantom(trigger_msg, f"Подтянул {len(fetched)} сообщений.")
                 else:
                     msg = "В теме" if found_gap else f"Многа букаф, ниасилил. Последние {len(fetched)}"
                     await utils.send_as_phantom(trigger_msg, msg)
@@ -171,5 +174,6 @@ async def handle_manual_sync_command(ctx: EventContext) -> None:
             limit=limit,
             silent_status=clean_mode,
             reaction_msg=ctx.message,
+            ignore_checkpoint=True,
         )
     )
