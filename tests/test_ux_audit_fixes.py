@@ -109,6 +109,14 @@ class TestUxAuditFixes(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_08_model_badges(self):
+        from modules import ai_service
+        self.assertEqual(ai_service._get_model_badge("openrouter/free"), "\n⚪")
+        self.assertEqual(ai_service._get_model_badge("gemini-3.5-flash-lite"), "\n🟢")
+        self.assertEqual(ai_service._get_model_badge("gemini-3.1-flash-lite"), "\n🟡")
+        self.assertEqual(ai_service._get_model_badge("gemma-4-31b-it"), "\n🔴")
+        self.assertEqual(ai_service._get_model_badge("gigachat"), "\n⚫")
+
 
 if __name__ == "__main__":
     unittest.main()

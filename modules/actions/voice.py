@@ -248,9 +248,11 @@ async def summarize_voice_transcription(
             reasoning_effort="minimal",
             temperature=0.7,
             count_quota=False,
+            include_badge=False,
         )
         cleaned = ai_service.clean_ai_response(res)
         cleaned = re.sub(r"(?s)\n\n\*\*>\s*\[.*?\]\*\*", "", cleaned).strip()
+        cleaned = re.sub(r"\n[⚪🟢🟡🔴⚫]\s*$", "", cleaned).strip()
 
         # Защита от возврата системных ошибок call_ai и мусора
         is_err = (

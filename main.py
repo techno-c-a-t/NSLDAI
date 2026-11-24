@@ -191,7 +191,7 @@ async def main_handler(client: Client, message: Message) -> None:
         should_trigger_dialog = starts_with_phantom or is_direct_tag or is_reply_to_phantom
     else:
         has_phantom_name = bool(re.search(cfg.PHANTOM_NAMES_PATTERN, text.lower()))
-        should_trigger_dialog = is_direct_tag or is_reply_to_phantom or has_phantom_name
+        should_trigger_dialog = is_direct_tag or (is_reply_to_phantom and has_phantom_name) or has_phantom_name
 
     # Голосовые и кружочки без текстового обращения не перехватываем в DIALOG, чтобы они дошли до авто-ГС
     if (message.voice or message.video_note) and not text.strip():

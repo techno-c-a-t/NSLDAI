@@ -287,6 +287,7 @@ async def should_assistant_respond(
             chat_id=chat_id,
             reasoning_effort="minimal",
             count_quota=False,
+            include_badge=False,
         )
         cleaned_res = clean_ai_response(res).upper()
         decision = "YES" if "YES" in cleaned_res else "NO"
@@ -364,6 +365,7 @@ async def extract_mentioned_dossiers_via_gemma(
             reasoning_effort="minimal",
             temperature=0.0,
             count_quota=False,
+            include_badge=False,
         )
         
         clean_res = re.sub(r"(?s)<thought>.*?</thought>", "", gemma_res).strip()
@@ -399,6 +401,24 @@ async def extract_mentioned_dossiers_via_gemma(
         return []
 
 
+def _get_model_badge(model_name: str) -> str:
+    """
+    @brief Возвращает компактный цветной индикатор модели с новой строки.
+    """
+    m = (model_name or "").lower()
+    if "/" in m:
+        return "\n⚪"
+    if "3.5" in m:
+        return "\n🟢"
+    if "3.1" in m:
+        return "\n🟡"
+    if "gemma" in m:
+        return "\n🔴"
+    if "gigachat" in m:
+        return "\n⚫"
+    return "\n🟡"
+
+
 async def call_ai(
     user_id: int, 
     username: Optional[str], 
@@ -412,6 +432,7 @@ async def call_ai(
     reasoning_effort: Optional[str] = None,
     temperature: float = 0.95,
     count_quota: bool = True,
+    include_badge: bool = True,
 ) -> str:
     """
     @brief Главная функция обращения к ИИ с каскадом отката СТРОГО ВНИЗ ПО ИЕРАРХИИ.
@@ -492,7 +513,7 @@ async def call_ai(
             if count_quota:
                 db.increment_user_requests(user_id)
 
-            footer = "" if target_model == models_to_try[0] else f"\n\n_[Использована модель: {target_model}]_"
+            footer = _get_model_badge(target_model) if include_badge else ""
 
             if chat_id:
                 asyncio.create_task(tracer.queue_trace(chat_id, {
@@ -536,7 +557,7 @@ async def call_ai(
     # 2. FALLBACK: СБЕР GIGACHAT BOT (Если все модели в срезе не ответили)
     try:
         giga_res = await _invoke_gigachat_model(system_msg, user_msg, status_msg)
-        footer = "\n\n_[Модели Google временно недоступны, использован Сбер GigaChat (контекст сильно уменьшен)]_"
+        footer = "\n⚫" if include_badge else ""
         
         if chat_id:
             asyncio.create_task(tracer.queue_trace(chat_id, {

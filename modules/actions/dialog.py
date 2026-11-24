@@ -49,7 +49,8 @@ async def handle_dialog(message: Any, text: str, username: Optional[str], user_i
         is_reply and 
         replied_msg and 
         replied_msg.from_user and 
-        replied_msg.from_user.is_self
+        replied_msg.from_user.is_self and 
+        re.search(cfg.PHANTOM_NAMES_PATTERN, text.lower())
     )
 
     # ---------------------------------------------------------------------
